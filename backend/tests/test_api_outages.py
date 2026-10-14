@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import datetime
+from typing import Any
 
 import httpx
 import pytest
@@ -12,7 +13,7 @@ from app.ticker import OutageTicker
 from tests.support import FakeClock, Home, bearer, collect, overpass_element
 
 
-def at(outage: dict, key: str) -> datetime:
+def at(outage: dict[str, Any], key: str) -> datetime:
     milestone = next(m for m in outage["milestones"] if m["key"] == key)
     return datetime.fromisoformat(milestone["at"])
 
@@ -77,7 +78,7 @@ async def test_drill_runs_at_speed(client: httpx.AsyncClient, equipped: Home) ->
     ],
 )
 async def test_start_outage_validation(
-    client: httpx.AsyncClient, equipped: Home, body: dict
+    client: httpx.AsyncClient, equipped: Home, body: dict[str, Any]
 ) -> None:
     response = await client.post(f"{equipped.url}/outages", json=body, headers=equipped.owner)
     assert response.status_code == 400

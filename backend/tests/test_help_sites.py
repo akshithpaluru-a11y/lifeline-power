@@ -22,7 +22,7 @@ OMAHA = (41.2565, -95.9345)
 
 def sent_query(external: respx.MockRouter) -> str:
     """The Overpass QL the app sent in its first (form-encoded) request."""
-    body = external["overpass"].calls[0].request.content.decode()
+    body: str = external["overpass"].calls[0].request.content.decode()
     return parse_qs(body)["data"][0]
 
 

@@ -1,16 +1,9 @@
 """SQLite database access (SQLAlchemy 2.0, async via aiosqlite)."""
 
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from typing import Any
 
 from sqlalchemy import event
-from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from app.models import Base
 
@@ -28,12 +21,6 @@ class Database:
         """Create any missing tables (the schema is small enough not to need migrations)."""
         async with self.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
-
-    @asynccontextmanager
-    async def session(self) -> AsyncIterator[AsyncSession]:
-        """A session that rolls back on error and always closes."""
-        async with self.sessions() as session:
-            yield session
 
     async def dispose(self) -> None:
         """Close all pooled connections."""

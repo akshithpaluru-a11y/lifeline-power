@@ -2,9 +2,10 @@
 
 from typing import Any
 
-from fastapi import APIRouter, Request, UploadFile
+from fastapi import APIRouter, Request
 from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
+from starlette.datastructures import UploadFile
 
 from app.ai import MAX_IMAGE_BYTES
 from app.api.deps import ContextDep
