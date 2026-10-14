@@ -5,7 +5,7 @@ idle connections open through proxies.
 """
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query
@@ -55,26 +55,40 @@ async def stream(
 
 async def _events(
     context: AppContext, household_id: str, viewer_id: str | None
-) -> AsyncIterator[ServerSentEvent]:
-    """The snapshot, then every event until the client leaves or the stream is closed."""
-    # Subscribe before reading the snapshot so nothing that happens in between is missed.
+) -> AsyncGenerator[ServerSentEvent]:
+    """The snapshot, then every event until the client leaves or the stream is closed.
+
+    `viewer_id` is the caregiver watching (None for the owner).
+    """
+    # Subscribe before reading the snapshot so nothing that happens in between is missed. It
+    # also closes a gap in revoking access: the token was checked in the handler, before this
+    # generator started, so a caregiver removed in between would not have been reached by the
+    # removal's `broker.close`. The snapshot read checks again that they are still a caregiver;
+    # a removal committed after that check finds this subscription and closes it.
     with context.broker.subscribe(household_id, viewer_id) as subscription:
         # The read runs in its own task: if the client leaves mid-read, the stream is cancelled
         # but the read still finishes and releases its connection, instead of being cut off
         # inside the database driver.
-        snapshot = await asyncio.shield(_snapshot(context.db, household_id))
-        if snapshot is None:
+        snapshot = await asyncio.shield(_snapshot(context.db, household_id, viewer_id))
+        if snapshot is None or subscription.closed:
             return
         yield _message("snapshot", snapshot.model_dump(mode="json"))
         while (event := await subscription.next()) is not None:
             yield _message(event.name, event.data)
 
 
-async def _snapshot(db: Database, household_id: str) -> SnapshotData | None:
-    """The household and its active outage, or None if the household is gone."""
+async def _snapshot(db: Database, household_id: str, viewer_id: str | None) -> SnapshotData | None:
+    """The household and its active outage.
+
+    None if the household is gone, or the viewer is no longer one of its caregivers.
+    """
     async with db.sessions() as session:
         household = await session.get(models.Household, household_id)
         if household is None:
+            return None
+        # The caregivers are read after the household row, so if this read already sees what
+        # a removal changed (such as the new join code it sets), it also sees the removal.
+        if viewer_id is not None and all(c.id != viewer_id for c in household.caregivers):
             return None
         outage = await active_outage(session, household_id)
         return SnapshotData(

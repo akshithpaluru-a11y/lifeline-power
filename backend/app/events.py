@@ -91,23 +91,52 @@ class Event:
 
 
 class Subscription:
-    """A stream's view of one household's events."""
+    """A stream's view of one household's events.
+
+    Closing is a flag, not just a message in the queue, so nothing can push it out: once closed,
+    a subscription delivers nothing more, however many events are published afterwards.
+    """
 
     def __init__(self, queue_size: int, viewer_id: str | None) -> None:
         self.viewer_id = viewer_id
         """Who is watching (a caregiver id), so one person's streams can be closed."""
         self._queue: asyncio.Queue[Event | None] = asyncio.Queue(maxsize=queue_size)
+        self._closed = False
+
+    @property
+    def closed(self) -> bool:
+        """Whether the stream has been ended (it then receives no more events)."""
+        return self._closed
 
     async def next(self) -> Event | None:
-        """Wait for the next event; None means the channel was closed."""
+        """Wait for the next event; None means the stream is over and should end."""
+        if self._closed:
+            return None
         return await self._queue.get()
 
-    def deliver(self, event: Event | None) -> None:
-        """Queue an event. A subscriber that has fallen far behind loses its oldest event."""
+    def deliver(self, event: Event) -> None:
+        """Queue an event for this stream.
+
+        A stream whose queue is full has stopped reading (its client is gone or stuck). Quietly
+        dropping events would let it miss an alarm without knowing, so the stream is ended
+        instead: the client reconnects and starts again from a fresh snapshot.
+        """
+        if self._closed:
+            return
         if self._queue.full():
-            self._queue.get_nowait()
-            logger.warning("Event queue full; dropped the oldest event for a slow subscriber")
+            logger.warning("Event queue full; ending a stream that stopped reading")
+            self.close()
+            return
         self._queue.put_nowait(event)
+
+    def close(self) -> None:
+        """End the stream. Events still queued are dropped and `next` returns None."""
+        if self._closed:
+            return
+        self._closed = True
+        while not self._queue.empty():
+            self._queue.get_nowait()
+        self._queue.put_nowait(None)  # wakes a `next` that is already waiting
 
 
 class EventBroker:
@@ -141,10 +170,12 @@ class EventBroker:
         """End a household's streams: all of them, or just one viewer's.
 
         Used when a household is deleted, or a caregiver is removed and must stop seeing it.
+        Closed streams receive nothing published after this call, not even events already
+        waiting in their queue.
         """
         for subscription in self._subscribers.get(household_id, ()):
             if viewer_id is None or subscription.viewer_id == viewer_id:
-                subscription.deliver(None)
+                subscription.close()
 
     def subscriber_count(self, household_id: str) -> int:
         """How many streams are watching a household."""

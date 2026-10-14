@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     ticker_interval_seconds: float = Field(default=2.0, gt=0)
     sse_ping_seconds: float = Field(default=15.0, gt=0)
 
+    # Limits on wrong join codes, so codes can't be guessed (see `auth.JoinCodeGuard`).
+    join_attempts_per_client: int = Field(default=10, ge=1)
+    """Wrong join codes one IP address (or IPv6 /64) may try per window."""
+    join_attempts_overall: int = Field(default=200, ge=1)
+    """Wrong join codes everyone together may try per window, against guessing from many
+    addresses at once."""
+    join_attempt_window_seconds: float = Field(default=900.0, gt=0)
+
     anthropic_api_key: str | None = Field(
         default=None, validation_alias=AliasChoices("ANTHROPIC_API_KEY", "anthropic_api_key")
     )

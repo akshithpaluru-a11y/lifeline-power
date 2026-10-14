@@ -9,7 +9,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import models
-from app.auth import Principal, Role, authorize, resolve_token
+from app.auth import Principal, Role, authorize, confirm_still_member, resolve_token
 from app.context import AppContext
 from app.services.households import HouseholdService, load_household
 from app.services.outages import OutageService
@@ -62,7 +62,9 @@ def _household_access(require: Role | None) -> Callable[..., Awaitable[Access]]:
 
     async def dependency(household_id: str, principal: PrincipalDep, session: SessionDep) -> Access:
         authorize(principal, household_id, require=require)
-        return Access(principal, await load_household(session, household_id))
+        household = await load_household(session, household_id)
+        confirm_still_member(principal, household)
+        return Access(principal, household)
 
     return dependency
 

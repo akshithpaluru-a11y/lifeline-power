@@ -1,32 +1,44 @@
 """Help and preparation: nearby places with power, the utility letter and the emergency card."""
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Query
+from pydantic import BeforeValidator, Field
 
 from app.api.deps import ContextDep, MemberAccess, OwnerAccess
 from app.errors import bad_request
 from app.help_sites import NO_LOCATION_NOTE
 from app.letters import emergency_card, medical_letter
-from app.schemas import EmergencyCard, HelpSitesResponse, MedicalLetter
+from app.schemas import EmergencyCard, HelpSitesResponse, Latitude, Longitude, MedicalLetter
 from app.services.households import compute_plan, household_view
 from app.utilities_data import find_programs
 
 router = APIRouter(tags=["help and preparation"])
+
+DEFAULT_HELP_RADIUS_KM = 15.0
+
+
+def _blank_as_missing(value: Any) -> Any:
+    """Treat `?lat=` like no `lat` at all: the contract's URL form leaves unknown values empty."""
+    return None if isinstance(value, str) and not value.strip() else value
+
+
+_BlankAsMissing = BeforeValidator(_blank_as_missing)
+_RadiusKm = Annotated[float, Field(ge=1, le=50)]
 
 
 @router.get("/households/{household_id}/help-sites")
 async def help_sites(
     access: MemberAccess,
     context: ContextDep,
-    lat: Annotated[float | None, Query(ge=-90, le=90)] = None,
-    lon: Annotated[float | None, Query(ge=-180, le=180)] = None,
-    radius_km: Annotated[float, Query(ge=1, le=50)] = 15,
+    lat: Annotated[Latitude | None, _BlankAsMissing, Query()] = None,
+    lon: Annotated[Longitude | None, _BlankAsMissing, Query()] = None,
+    radius_km: Annotated[_RadiusKm | None, _BlankAsMissing, Query()] = DEFAULT_HELP_RADIUS_KM,
 ) -> HelpSitesResponse:
     """Hospitals, fire stations and other places nearby that may have power.
 
     `lat` / `lon` default to the household's location (for example, pass the phone's current
-    position when away from home).
+    position when away from home). Empty values (`?lat=&lon=`) count as not given.
     """
     if (lat is None) != (lon is None):
         raise bad_request("lat and lon must be given together.")
@@ -34,7 +46,8 @@ async def help_sites(
         lat, lon = access.household.lat, access.household.lon
     if lat is None or lon is None:
         return HelpSitesResponse(sites=[], source="fallback", note=NO_LOCATION_NOTE)
-    result = await context.help_sites.find(lat, lon, radius_km)
+    radius = DEFAULT_HELP_RADIUS_KM if radius_km is None else radius_km
+    result = await context.help_sites.find(lat, lon, radius)
     return HelpSitesResponse(sites=result.sites, source=result.source, note=result.note)
 
 
