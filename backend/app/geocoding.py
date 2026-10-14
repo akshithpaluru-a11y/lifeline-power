@@ -2,8 +2,9 @@
 
 Forward lookups try the US Census Bureau geocoder first (free, no key, made for US addresses) and
 fall back to OpenStreetMap Nominatim. Reverse lookups (a map pin or phone location -> state) use
-Nominatim. Both are cached, time-limited, and never raise: a failed lookup just leaves the
-location unset, and the plan then suggests adding one.
+Nominatim. Both are time-limited and never raise: a failed lookup just leaves the location
+unset, and the plan then suggests adding one. Answers are cached; failures are not, so an
+address is looked up again once the services are back.
 """
 
 import asyncio
@@ -19,6 +20,17 @@ logger = logging.getLogger(__name__)
 
 _NOMINATIM_MIN_INTERVAL_SECONDS = 1.0
 """Nominatim's usage policy allows at most one request per second."""
+CENSUS_TIME_LIMIT_SECONDS = 2.5
+"""Longest we wait for the Census geocoder, so that Nominatim still gets its turn within the
+few seconds a caller gives the whole lookup (6 s when a household is saved)."""
+
+
+class _LookupFailed(Exception):
+    """A geocoding service couldn't be asked (error, timeout, or an answer we can't read).
+
+    Kept apart from "no match", so that a failure is never cached as "this address doesn't
+    exist".
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,8 +68,19 @@ class Geocoder:
         key = " ".join(address.lower().split())
         if key in self._forward:
             return self._forward[key]
-        result = await self._census(address) or await self._nominatim_search(address)
-        self._forward[key] = result
+        result, failed = None, False
+        for lookup in (self._census, self._nominatim_search):
+            try:
+                result = await lookup(address)
+            except _LookupFailed as exc:
+                logger.warning("Geocoding failed (%s)", exc)
+                failed = True
+                continue
+            if result is not None:
+                break
+        # "Not found" is only remembered when every service could be asked.
+        if result is not None or not failed:
+            self._forward[key] = result
         return result
 
     async def state_for(self, lat: float, lon: float) -> str | None:
@@ -65,20 +88,31 @@ class Geocoder:
         key = (round(lat, 3), round(lon, 3))
         if key in self._reverse:
             return self._reverse[key]
-        payload = await self._nominatim_get(
-            "/reverse", {"lat": f"{lat:.6f}", "lon": f"{lon:.6f}", "format": "jsonv2", "zoom": "5"}
-        )
+        try:
+            payload = await self._nominatim_get(
+                "/reverse",
+                {"lat": f"{lat:.6f}", "lon": f"{lon:.6f}", "format": "jsonv2", "zoom": "5"},
+            )
+        except _LookupFailed as exc:
+            logger.warning("Reverse geocoding failed (%s)", exc)
+            return None
         state = _state_from_nominatim(payload.get("address")) if isinstance(payload, dict) else None
         self._reverse[key] = state
         return state
 
     async def _census(self, address: str) -> GeocodeResult | None:
+        """The Census geocoder's best match, or None if it has none."""
         try:
-            response = await self._http.get(
-                f"{self._census_url}/locations/onelineaddress",
-                params={"address": address, "benchmark": "Public_AR_Current", "format": "json"},
-                timeout=self._timeout,
-            )
+            async with asyncio.timeout(min(self._timeout, CENSUS_TIME_LIMIT_SECONDS)):
+                response = await self._http.get(
+                    f"{self._census_url}/locations/onelineaddress",
+                    params={
+                        "address": address,
+                        "benchmark": "Public_AR_Current",
+                        "format": "json",
+                    },
+                    timeout=self._timeout,
+                )
             response.raise_for_status()
             matches = response.json()["result"]["addressMatches"]
             if not matches:
@@ -91,11 +125,11 @@ class Geocoder:
                 state=state.upper() if isinstance(state, str) and len(state) == 2 else None,
                 source="census",
             )
-        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
-            logger.warning("Census geocoder failed (%s)", exc)
-            return None
+        except (TimeoutError, httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            raise _LookupFailed(f"Census: {exc!r}") from exc
 
     async def _nominatim_search(self, address: str) -> GeocodeResult | None:
+        """Nominatim's best US match, or None if it has none."""
         payload = await self._nominatim_get(
             "/search",
             {
@@ -106,7 +140,9 @@ class Geocoder:
                 "limit": "1",
             },
         )
-        if not isinstance(payload, list) or not payload:
+        if not isinstance(payload, list):
+            raise _LookupFailed(f"Nominatim /search: unexpected {type(payload).__name__}")
+        if not payload:
             return None
         try:
             best = payload[0]
@@ -116,11 +152,11 @@ class Geocoder:
                 state=_state_from_nominatim(best.get("address")),
                 source="nominatim",
             )
-        except (KeyError, TypeError, ValueError):
-            return None
+        except (KeyError, TypeError, ValueError) as exc:
+            raise _LookupFailed(f"Nominatim /search: {exc!r}") from exc
 
     async def _nominatim_get(self, path: str, params: dict[str, str]) -> Any:
-        """GET a Nominatim endpoint, at most once per second, returning JSON or None."""
+        """GET a Nominatim endpoint, at most once per second, returning its JSON."""
         async with self._nominatim_lock:
             wait = _NOMINATIM_MIN_INTERVAL_SECONDS - (time.monotonic() - self._nominatim_last_call)
             if wait > 0:
@@ -132,8 +168,7 @@ class Geocoder:
                 response.raise_for_status()
                 return response.json()
             except (httpx.HTTPError, ValueError) as exc:
-                logger.warning("Nominatim %s failed (%s)", path, exc)
-                return None
+                raise _LookupFailed(f"Nominatim {path}: {exc!r}") from exc
             finally:
                 self._nominatim_last_call = time.monotonic()
 

@@ -73,15 +73,36 @@ def travel_minutes(distance_km: float) -> int:
 
 
 def build_query(lat: float, lon: float, radius_km: float) -> str:
-    """Overpass QL for the useful places within `radius_km` of a point."""
+    """Overpass QL for the useful places within `radius_km` of a point.
+
+    The output has no element limit: Overpass would apply it in id order (nodes first), not
+    by distance, so in a dense area it would drop hospitals mapped as buildings and keep
+    far-away places. `parse_sites` sorts everything by usefulness and distance, then keeps the
+    first `MAX_SITES`.
+    """
     around = f"(around:{round(radius_km * 1000)},{lat:.6f},{lon:.6f})"
     amenities = "|".join(_AMENITY_KINDS)
     return (
         "[out:json][timeout:20];("
         f'nwr["amenity"~"^({amenities})$"]{around};'
         f'nwr["amenity"="social_facility"]["social_facility"="shelter"]{around};'
-        ");out center tags 300;"
+        ");out center tags;"
     )
+
+
+def _elements(payload: Any) -> list[Any]:
+    """The elements of an Overpass answer; ValueError if Overpass reported a failure.
+
+    Overpass reports runtime errors (out of memory, timeouts) as a normal 200 answer with a
+    `remark` and no or partial elements, which must not pass for "nothing nearby".
+    """
+    if not isinstance(payload, dict) or not isinstance(payload.get("elements"), list):
+        raise ValueError("Overpass answer has no list of elements")
+    elements: list[Any] = payload["elements"]
+    remark = payload.get("remark")
+    if remark and ("error" in str(remark).lower() or not elements):
+        raise ValueError(f"Overpass remark: {remark}")
+    return elements
 
 
 def _kind(tags: Mapping[str, str]) -> HelpSiteKind:
@@ -184,9 +205,9 @@ class HelpSiteFinder:
                 timeout=self._timeout,
             )
             response.raise_for_status()
-            elements = response.json()["elements"]
-            sites = parse_sites(elements, lat, lon)
-        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            sites = parse_sites(_elements(response.json()), lat, lon)
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            # Errors and malformed answers alike; not cached, so the next lookup tries again.
             logger.warning("Overpass lookup failed (%s); returning fallback", exc)
             return HelpSitesResult(sites=[], source="fallback", note=FALLBACK_NOTE)
 

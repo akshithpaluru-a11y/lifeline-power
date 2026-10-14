@@ -143,11 +143,21 @@ def _instructions(household: Household, plan: Plan) -> list[str]:
         )
     steps.append("Open LifeLine Power and check in every hour so caregivers know you are OK.")
     if plan.critical_runtime_minutes is not None and plan.bottleneck_device_id:
-        steps.append(
-            f"With full batteries, {labels.get(plan.bottleneck_device_id, 'the first device')} "
-            f"lasts about {format_duration(plan.critical_runtime_minutes)}. Leave for a place "
-            "with power well before then; the app shows your leave-by time."
-        )
+        # The plan uses the charge levels the family last saved, not full batteries, so the
+        # card says so (and the same figure is in `critical_runtime_minutes`).
+        device = labels.get(plan.bottleneck_device_id, "the first life-sustaining device")
+        if plan.critical_runtime_minutes >= 1:  # less is no time at all on a printed card
+            steps.append(
+                f"At the charge levels last saved in the app, {device} lasts about "
+                f"{format_duration(plan.critical_runtime_minutes)}. Leave for a place with power "
+                "well before then; the app shows your leave-by time."
+            )
+        else:
+            steps.append(
+                f"At the charge levels last saved in the app, {device} has no battery or backup "
+                "power to keep it running. If the power goes out, go to a place with power "
+                "right away or call 911."
+            )
     if any(b.type in ("generator", "car_inverter") for b in household.backups):
         steps.append(
             "Run generators and cars outdoors only, at least 20 feet from doors and windows."

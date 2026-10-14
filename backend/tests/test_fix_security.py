@@ -572,7 +572,8 @@ async def test_identify_device_requests_that_still_work(client: httpx.AsyncClien
     # A photo alone (with an empty text field) still reaches the photo path.
     response = await client.post(IDENTIFY_URL, files={"text": (None, ""), "image": PHOTO})
     assert response.status_code == 503  # no API key in tests: photos need Claude
-    response = await client.post(IDENTIFY_URL, files={"image": ("big.jpg", b"\xff" * 4_000_000)})
+    big_jpeg = b"\xff\xd8\xff" + b"\xff" * 4_000_000  # starts like a JPEG: photos are sniffed
+    response = await client.post(IDENTIFY_URL, files={"image": ("big.jpg", big_jpeg)})
     assert response.status_code == 503  # a 4 MB photo is within the limit
 
 
