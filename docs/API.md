@@ -194,9 +194,14 @@ Planner rules the backend implements (documented so the UI can explain them):
   "acks": [
     { "caregiver_id": "cg_P0p1", "name": "Maya", "message": "On my way with the generator", "eta_minutes": 25, "at": "2026-10-20T18:06:00Z" }
   ],
-  "last_check_in_at": "2026-10-20T18:04:11Z"
+  "last_check_in_at": "2026-10-20T18:04:11Z",
+  "speed": 1                                // 1 for real outages; drills may run faster (see below)
 }
 ```
+**Drill speed.** `speed` (1 to 600, default 1) is accepted only when `source` is `"drill"`. It
+compresses time so a 6-hour countdown can be demoed in minutes: battery drain, milestone `at` times
+and the server ticker all run `speed` times faster. Clients counting down locally must do the same
+(remaining = (milestone.at - now) as returned; the server already compresses `at`).
 Milestone keys: `power_lost` (at start, info), `conserve` (start, info), `check_in` (next hourly
 check-in), `halfway` (50% of critical runtime, warning), `leave_by` (critical runtime minus travel
 time to nearest help site minus 30 min buffer, warning; travel defaults to 30 min if unknown),
@@ -256,7 +261,7 @@ caregiver events are marked `drill: true`.
 ### Outages
 | Method | Path | Auth | Body | Returns |
 |---|---|---|---|---|
-| POST | `/api/households/{id}/outages` | owner | `{ source: "charging_lost" \| "manual" \| "drill" }` | `201 { outage: Outage }`; `409 conflict` if one is already active |
+| POST | `/api/households/{id}/outages` | owner | `{ source: "charging_lost" \| "manual" \| "drill", speed?: number }` | `201 { outage: Outage }`; `409 conflict` if one is already active |
 | GET | `/api/households/{id}/outages/current` | owner or caregiver | | `{ outage: Outage \| null }` |
 | POST | `/api/households/{id}/outages/current/check-in` | owner | `{ ok: true, devices?: [{ device_id, charge_percent }] }` | `{ outage }` (plan and milestones recomputed from the new charge levels) |
 | POST | `/api/households/{id}/outages/current/ack` | caregiver | `{ message?, eta_minutes? }` | `{ outage }` |
