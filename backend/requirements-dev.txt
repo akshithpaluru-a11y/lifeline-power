@@ -1,0 +1,8 @@
+# Development and test dependencies (pinned), on top of the runtime ones.
+-r requirements.txt
+pytest==9.1.1
+pytest-asyncio==1.4.0
+respx==0.23.1
+ruff==0.17.0
+mypy==2.4.0
+types-cachetools==7.0.0.20260713

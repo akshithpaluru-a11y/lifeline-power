@@ -1,0 +1,318 @@
+"""Outages: starting one, check-ins, caregiver acknowledgements and ending it.
+
+An outage keeps three snapshots as JSON: the plan, the milestone timeline, and the battery
+levels the plan was computed from (`energy_state`). A check-in estimates where the batteries
+are now, applies anything the owner reported, and recomputes all three.
+
+Requests and the background ticker both change outages. Every change happens while holding the
+household's lock in `OutageLocks`, so they never overwrite each other. (The row's version
+counter is a second line of defence; it would catch a clash if the app ever ran as several
+processes.)
+"""
+
+import asyncio
+from dataclasses import asdict
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
+
+from app import models, schemas
+from app.auth import Principal
+from app.errors import bad_request, conflict, not_found
+from app.events import AckData, CheckInData, EventBroker, OutageEventData
+from app.help_sites import HelpSiteFinder
+from app.ids import new_id
+from app.outage_engine import (
+    BackupLevel,
+    HelpTarget,
+    TimelineContext,
+    advance_state,
+    apply_reports,
+    build_milestones,
+    merge_with_household,
+    outage_minutes_between,
+)
+from app.planner import BackupInput, DeviceInput, build_plan
+from app.services.households import backup_input, device_input, household_facts
+from app.timeutil import Clock
+
+HELP_LOOKUP_BUDGET_SECONDS = 3.0
+"""Longest starting an outage waits to find the nearest help site (otherwise: 30 min travel)."""
+HISTORY_LIMIT = 200
+
+
+class OutageLocks:
+    """One lock per household, held while its outage is read and changed."""
+
+    def __init__(self) -> None:
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def __call__(self, household_id: str) -> asyncio.Lock:
+        """The household's lock, for `async with locks(household_id):`."""
+        return self._locks.setdefault(household_id, asyncio.Lock())
+
+
+def outage_view(outage: models.Outage) -> schemas.Outage:
+    """The API representation of an outage."""
+    return schemas.Outage.model_validate(outage)
+
+
+def dump_milestones(milestones: list[schemas.Milestone]) -> list[Any]:
+    """Milestones as JSON for storage."""
+    return [m.model_dump(mode="json") for m in milestones]
+
+
+def load_milestones(outage: models.Outage) -> list[schemas.Milestone]:
+    """An outage's stored milestones."""
+    return [schemas.Milestone.model_validate(m) for m in outage.milestones]
+
+
+def _energy_state(devices: list[DeviceInput], backups: list[BackupInput]) -> dict[str, Any]:
+    return {"devices": [asdict(d) for d in devices], "backups": [asdict(b) for b in backups]}
+
+
+def _load_energy_state(state: dict[str, Any]) -> tuple[list[DeviceInput], list[BackupInput]]:
+    return (
+        [DeviceInput(**d) for d in state["devices"]],
+        [BackupInput(**b) for b in state["backups"]],
+    )
+
+
+def _labels(household: models.Household) -> dict[str, str]:
+    return {device.id: device.label for device in household.devices}
+
+
+async def active_outage(session: AsyncSession, household_id: str) -> models.Outage | None:
+    """The household's active outage, freshly read from the database."""
+    return await session.scalar(
+        select(models.Outage)
+        .where(models.Outage.household_id == household_id, models.Outage.status == "active")
+        .execution_options(populate_existing=True)
+    )
+
+
+class OutageService:
+    """Outage operations for one request."""
+
+    def __init__(
+        self,
+        session: AsyncSession,
+        broker: EventBroker,
+        locks: OutageLocks,
+        help_sites: HelpSiteFinder,
+        clock: Clock,
+    ) -> None:
+        self._session = session
+        self._broker = broker
+        self._locks = locks
+        self._help_sites = help_sites
+        self._clock = clock
+
+    async def current(self, household_id: str) -> schemas.Outage | None:
+        """The active outage, or None."""
+        outage = await active_outage(self._session, household_id)
+        return None if outage is None else outage_view(outage)
+
+    async def history(self, household_id: str) -> list[schemas.OutageSummary]:
+        """Past and current outages, newest first, without their plans."""
+        outages = await self._session.scalars(
+            select(models.Outage)
+            .where(models.Outage.household_id == household_id)
+            .order_by(models.Outage.started_at.desc())
+            .limit(HISTORY_LIMIT)
+            .options(defer(models.Outage.plan), defer(models.Outage.energy_state))
+        )
+        return [schemas.OutageSummary.model_validate(outage) for outage in outages]
+
+    async def start(
+        self, household: models.Household, body: schemas.OutageCreate
+    ) -> schemas.Outage:
+        """Start an outage (or drill): plan from the saved equipment, then lay out milestones.
+
+        A real outage replaces a drill that is still running. Otherwise only one outage can be
+        active at a time.
+        """
+        if body.source == "charging_lost" and not household.armed:
+            raise conflict(
+                "The outage alarm is turned off for this home. Turn it on, or report the outage "
+                "manually."
+            )
+        target = await self._help_target(household)
+        async with self._locks(household.id):
+            ended_drill = await active_outage(self._session, household.id)
+            if ended_drill is not None:
+                if not ended_drill.drill or body.source == "drill":
+                    raise conflict("An outage is already active. End it before starting another.")
+                self._finish(ended_drill)
+                await self._session.flush()
+
+            now = self._clock()
+            devices = [device_input(d) for d in household.devices]
+            backups = [backup_input(b) for b in household.backups]
+            plan = build_plan(devices, backups, household_facts(household), now=now)
+            timeline = TimelineContext(
+                source=body.source,
+                speed=body.speed,
+                started_at=now,
+                plan_at=now,
+                last_check_in_at=now,
+                help_target=target,
+                device_labels=_labels(household),
+            )
+            outage = models.Outage(
+                id=new_id("og"),
+                household_id=household.id,
+                status="active",
+                source=body.source,
+                speed=body.speed,
+                started_at=now,
+                ended_at=None,
+                last_check_in_at=now,
+                last_check_in_ok=True,
+                missed_check_in_alerts=0,
+                help_site_name=target.name,
+                travel_minutes=target.travel_minutes,
+                plan=plan.model_dump(mode="json"),
+                milestones=dump_milestones(build_milestones(plan, timeline)),
+                energy_state=_energy_state(devices, backups),
+                acks=[],
+            )
+            self._session.add(outage)
+            try:
+                await self._session.commit()
+            except IntegrityError as exc:  # another process started one at the same moment
+                await self._session.rollback()
+                raise conflict("An outage is already active.") from exc
+
+        if ended_drill is not None:
+            self._publish_ended(ended_drill)
+        view = outage_view(outage)
+        self._broker.publish(
+            household.id, "outage_started", OutageEventData(outage=view, drill=outage.drill)
+        )
+        return view
+
+    async def check_in(
+        self, household: models.Household, body: schemas.CheckInRequest
+    ) -> schemas.Outage:
+        """Record that the owner checked in, and recompute the plan and milestones.
+
+        Battery levels are estimated from the time since the last plan, then overwritten with
+        anything the owner reported. Device settings changed during the outage (such as saver
+        mode) are picked up too.
+        """
+        device_charge = {r.device_id: r.charge_percent for r in body.devices or ()}
+        backup_levels = {
+            r.backup_id: BackupLevel(charge_percent=r.charge_percent, fuel_hours=r.fuel_hours)
+            for r in body.backups or ()
+        }
+        _check_ids(device_charge, {d.id for d in household.devices}, "device")
+        _check_ids(backup_levels, {b.id for b in household.backups}, "backup")
+
+        async with self._locks(household.id):
+            outage = await self._require_active(household.id)
+            now = self._clock()
+            old_plan = schemas.Plan.model_validate(outage.plan)
+            elapsed = outage_minutes_between(old_plan.computed_at, now, outage.speed)
+            devices, backups = _load_energy_state(outage.energy_state)
+            devices, backups = advance_state(devices, backups, old_plan, elapsed)
+            devices, backups = merge_with_household(
+                devices,
+                backups,
+                [device_input(d) for d in household.devices],
+                [backup_input(b) for b in household.backups],
+            )
+            devices, backups = apply_reports(devices, backups, device_charge, backup_levels)
+
+            plan = build_plan(devices, backups, household_facts(household), now=now)
+            timeline = TimelineContext(
+                source=outage.source,
+                speed=outage.speed,
+                started_at=outage.started_at,
+                plan_at=now,
+                last_check_in_at=now,
+                help_target=HelpTarget(outage.help_site_name, outage.travel_minutes),
+                device_labels=_labels(household),
+            )
+            outage.plan = plan.model_dump(mode="json")
+            outage.milestones = dump_milestones(
+                build_milestones(plan, timeline, previous=load_milestones(outage))
+            )
+            outage.energy_state = _energy_state(devices, backups)
+            outage.last_check_in_at = now
+            outage.last_check_in_ok = body.ok
+            outage.missed_check_in_alerts = 0
+            await self._session.commit()
+
+        view = outage_view(outage)
+        self._broker.publish(household.id, "check_in", CheckInData(outage=view))
+        return view
+
+    async def ack(
+        self, household_id: str, caregiver: Principal, body: schemas.AckRequest
+    ) -> schemas.Outage:
+        """Record a caregiver's acknowledgement ("On my way")."""
+        assert caregiver.caregiver_id is not None and caregiver.caregiver_name is not None
+        async with self._locks(household_id):
+            outage = await self._require_active(household_id)
+            ack = models.Ack(
+                caregiver_id=caregiver.caregiver_id,
+                name=caregiver.caregiver_name,
+                message=body.message or None,
+                eta_minutes=body.eta_minutes,
+                at=self._clock(),
+            )
+            outage.acks.append(ack)
+            await self._session.commit()
+
+        self._broker.publish(
+            household_id,
+            "ack",
+            AckData(outage_id=outage.id, ack=schemas.Ack.model_validate(ack)),
+        )
+        return outage_view(outage)
+
+    async def end(self, household_id: str) -> schemas.Outage:
+        """End the active outage (the power is back, or the drill is over)."""
+        async with self._locks(household_id):
+            outage = await self._require_active(household_id)
+            self._finish(outage)
+            await self._session.commit()
+        return self._publish_ended(outage)
+
+    async def _require_active(self, household_id: str) -> models.Outage:
+        outage = await active_outage(self._session, household_id)
+        if outage is None:
+            raise not_found("There is no active outage.")
+        return outage
+
+    def _finish(self, outage: models.Outage) -> None:
+        outage.status = "ended"
+        outage.ended_at = self._clock()
+
+    def _publish_ended(self, outage: models.Outage) -> schemas.Outage:
+        view = outage_view(outage)
+        self._broker.publish(
+            outage.household_id, "outage_ended", OutageEventData(outage=view, drill=outage.drill)
+        )
+        return view
+
+    async def _help_target(self, household: models.Household) -> HelpTarget:
+        """The nearest place likely to have power, if we can find it quickly."""
+        if household.lat is None or household.lon is None:
+            return HelpTarget.from_sites([])
+        try:
+            async with asyncio.timeout(HELP_LOOKUP_BUDGET_SECONDS):
+                result = await self._help_sites.find(household.lat, household.lon)
+        except TimeoutError:
+            return HelpTarget.from_sites([])
+        return HelpTarget.from_sites(result.sites)
+
+
+def _check_ids(reported: dict[str, Any], known: set[str], what: str) -> None:
+    unknown = sorted(set(reported) - known)
+    if unknown:
+        raise bad_request(f"Unknown {what} id: {', '.join(unknown)}.")
