@@ -34,8 +34,8 @@ def test_catalog_matching(text: str, kind: str, label: str, confidence: str) -> 
 
 def test_known_model_figures() -> None:
     result = identify_from_catalog("Inogen One G5")
-    assert (result.match.draw_watts, result.match.internal_battery_wh) == (25, 92)
-    assert "6.5 hours" in result.explanation
+    assert (result.match.draw_watts, result.match.internal_battery_wh) == (83, 92)
+    assert "highest setting" in result.explanation
 
 
 def test_unknown_device_becomes_custom() -> None:
@@ -123,43 +123,47 @@ def identifier(outcome: FakeResponse | Exception) -> tuple[DeviceIdentifier, Fak
 
 ANSWER = _ClaudeAnswer(
     kind="oxygen_concentrator_portable",
-    label="Inogen One G5",
+    label="OxyGo Next",
     draw_watts=28,
     internal_battery_wh=99,
     confidence="high",
-    explanation="Label shows Inogen One G5; 8-cell battery is about 99 Wh.",
+    explanation="Label shows OxyGo Next; its battery is about 99 Wh.",
 )
 
 
 async def test_claude_answer_is_used() -> None:
     helper, messages = identifier(FakeResponse(ANSWER))
     assert helper.ai_enabled
-    result = await helper.identify("Inogen One G5")
+    result = await helper.identify("OxyGo Next")
     assert result.source == "ai"
     assert result.match.model_dump() == {
         "kind": "oxygen_concentrator_portable",
-        "label": "Inogen One G5",
+        "label": "OxyGo Next",
         "draw_watts": 28,
         "internal_battery_wh": 99,
     }
     call = messages.calls[0]
     assert call["model"] == "claude-test-model"
     assert call["output_format"] is _ClaudeAnswer
-    assert call["messages"][0]["content"][-1] == {"type": "text", "text": "Device: Inogen One G5"}
+    assert call["messages"][0]["content"][-1] == {"type": "text", "text": "Device: OxyGo Next"}
 
 
 async def test_photo_is_sent_as_an_image_block() -> None:
     helper, messages = identifier(FakeResponse(ANSWER))
-    await helper.identify(None, b"\x89PNG", "image/png")
+    await helper.identify(None, b"\x89PNG\r\n\x1a\n", "image/png")
     image = messages.calls[0]["messages"][0]["content"][0]
     assert image["type"] == "image"
-    assert image["source"] == {"type": "base64", "media_type": "image/png", "data": "iVBORw=="}
+    assert image["source"] == {
+        "type": "base64",
+        "media_type": "image/png",
+        "data": "iVBORw0KGgo=",
+    }
 
 
 async def test_out_of_range_figures_are_replaced_with_catalog_values() -> None:
     wild = ANSWER.model_copy(update={"draw_watts": -5, "internal_battery_wh": 1e9})
     helper, _ = identifier(FakeResponse(wild))
-    result = await helper.identify("Inogen One G5")
+    result = await helper.identify("OxyGo Next")
     assert (result.match.draw_watts, result.match.internal_battery_wh) == (30, 92)
 
 
@@ -172,8 +176,9 @@ async def test_out_of_range_figures_are_replaced_with_catalog_values() -> None:
     ],
 )
 async def test_falls_back_to_catalog_when_claude_fails(outcome: FakeResponse | Exception) -> None:
-    helper, _ = identifier(outcome)
-    result = await helper.identify("Inogen One G5")
+    helper, messages = identifier(outcome)
+    result = await helper.identify("Inogn One G5")  # a typo, so Claude is asked first
+    assert messages.calls
     assert result.source == "catalog"
     assert result.match.label == "Inogen One G5"
 
@@ -181,5 +186,5 @@ async def test_falls_back_to_catalog_when_claude_fails(outcome: FakeResponse | E
 async def test_photo_only_fails_cleanly_when_claude_fails() -> None:
     helper, _ = identifier(FakeResponse(None, stop_reason="refusal"))
     with pytest.raises(ApiError) as caught:
-        await helper.identify(None, b"\xff\xd8", "image/jpeg")
+        await helper.identify(None, b"\xff\xd8\xff\xe0", "image/jpeg")
     assert caught.value.status_code == 503
