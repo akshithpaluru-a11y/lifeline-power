@@ -36,7 +36,8 @@ def minutes(result: Plan, device_id: str) -> float:
 
 
 def test_effective_draw_uses_saver_only_when_enabled_and_lower() -> None:
-    cpap = device(draw_watts=40, saver_draw_watts=10, duty_cycle=0.35)
+    # Not life-sustaining: a life-sustaining one is counted at its full draw (test_fix_planner).
+    cpap = device(draw_watts=40, saver_draw_watts=10, duty_cycle=0.35, life_sustaining=False)
     assert effective_draw_watts(cpap) == pytest.approx(14.0)
     assert effective_draw_watts(replace(cpap, saver_enabled=True)) == pytest.approx(3.5)
     assert effective_draw_watts(cpap, saver_all=True) == pytest.approx(3.5)

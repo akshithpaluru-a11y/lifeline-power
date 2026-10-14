@@ -71,6 +71,12 @@ class DeviceSpec:
     description: str
     keywords: tuple[str, ...]
     """Words people use for this kind of device (used by the device identifier)."""
+    runs_in_short_bursts: bool = False
+    """True when the duty cycle is made of short bursts spread through the day (suction, a
+    fridge compressor), so the daily average is a fair guide to how fast it drains a battery.
+    False when the device can run for hours at a stretch (an overnight BiPAP or dialysis
+    session, a feed): the planner then counts a life-sustaining one at its full draw, because
+    the power can go out just as it is switched on."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,8 +95,11 @@ class BackupSpec:
 
 _DEVICES: tuple[DeviceSpec, ...] = (
     # Philips EverFlo spec sheet: "average power consumption 350 W"; Colorado Country Life
-    # (co-op magazine) quotes 280-350 W for concentrators. Lower flow saves little on older units;
-    # some newer ones save a lot (Inogen At Home lists 100 W on setting 2), so 250 W is cautious.
+    # (co-op magazine) quotes 280-350 W for concentrators. No default saver figure: the EverFlo
+    # publishes a single average figure, and a lower flow saves little on such fixed-compressor
+    # units, so assuming one would make countdowns too long. Some newer units do save a lot
+    # (Inogen At Home lists 100 W on setting 2); families can enter their own model's figure.
+    # The tip and action stay so that a figure a family enters still carries the care-team check.
     DeviceSpec(
         kind="oxygen_concentrator_home",
         name="Home oxygen concentrator",
@@ -98,16 +107,16 @@ _DEVICES: tuple[DeviceSpec, ...] = (
         icon="oxygen",
         life_sustaining_default=True,
         typical_draw_watts=350,
-        saver_draw_watts=250,
-        saver_tip="Ask your care team ahead of time if a lower flow setting is safe for you, and "
-        "keep backup oxygen cylinders from your supplier.",
-        saver_action="Ask about a lower flow setting for {label}",
+        saver_draw_watts=None,
+        saver_tip="Use a lower flow setting only if your care team has said it is safe for you, "
+        "and keep backup oxygen cylinders from your supplier.",
+        saver_action="Ask your care team about a lower flow setting for {label}",
         internal_battery_wh=0,
         duty_cycle=1.0,
         ac_powered=True,
         description="Stationary concentrators plug into the wall and have no battery. Most use "
-        "280-350 W, so they drain a power station fast. Check your device manual for its exact "
-        "power use.",
+        "280-350 W, so they drain a power station fast, and many save little power at a lower "
+        "flow. Check your device manual for its exact power use.",
         keywords=("oxygen", "concentrator", "o2", "everflo", "perfecto", "lpm", "liter"),
     ),
     # Inogen One G5: single battery "up to 6.5 hours" on setting 1 (Inogen spec sheet);
@@ -121,9 +130,9 @@ _DEVICES: tuple[DeviceSpec, ...] = (
         life_sustaining_default=True,
         typical_draw_watts=30,
         saver_draw_watts=20,
-        saver_tip="A lower pulse setting makes the battery last longer. Ask your care team which "
-        "settings are safe for you.",
-        saver_action="Use a lower pulse setting on {label}",
+        saver_tip="A lower pulse setting makes the battery last longer. Use one only if your care "
+        "team has said it is safe for you.",
+        saver_action="Ask your care team about a lower pulse setting on {label}",
         internal_battery_wh=92,
         duty_cycle=1.0,
         ac_powered=False,
@@ -172,7 +181,8 @@ _DEVICES: tuple[DeviceSpec, ...] = (
         ac_powered=True,
         description="Counted as running about 8 hours a day. Many people can skip a night of "
         "CPAP in an outage, but some BiPAP users can't: ask your doctor and mark it "
-        "life-sustaining if you depend on it.",
+        "life-sustaining if you depend on it. A life-sustaining one is counted at its full "
+        "draw, because the power can go out just as it is switched on for the night.",
         keywords=("cpap", "bipap", "apap", "sleep apnea", "airsense", "dreamstation", "aircurve"),
     ),
     # UNFPA product specification for portable electric aspirators: about 100 W, battery
@@ -194,6 +204,7 @@ _DEVICES: tuple[DeviceSpec, ...] = (
         "units often have a battery good for about an hour of suction: enter it if yours does, "
         "and keep a manual suction device as a backup.",
         keywords=("suction", "aspirator", "vacu-aide", "secretions"),
+        runs_in_short_bursts=True,
     ),
     # Kangaroo Joey (Cardinal Health spec): battery lasts at least 18 h at 125 mL/h, 3.7 V
     # Li-ion; capacity isn't published, so we assume 10 Wh and a cautious 0.75 W (about 12 h).
@@ -251,6 +262,7 @@ _DEVICES: tuple[DeviceSpec, ...] = (
         description="Counted as driving about 15% of the time. Charge it fully whenever a storm "
         "is forecast; full-size chairs carry about 1 kWh of battery, folding chairs much less.",
         keywords=("wheelchair", "power chair", "scooter", "permobil", "jazzy", "mobility"),
+        runs_in_short_bursts=True,
     ),
     # Philips InnoSpire Essence: 120 V, 1.7 A, 5-7 minute treatments (Philips product page).
     # 1.7 A x 120 V is about 200 VA; 150 W is a cautious real-power figure.
@@ -270,6 +282,7 @@ _DEVICES: tuple[DeviceSpec, ...] = (
         description="Treatments take a few minutes, so we count about 5% of the time. Ask your "
         "doctor about a battery-powered mesh nebulizer or an inhaler with spacer as a backup.",
         keywords=("nebulizer", "neb", "innospire", "pari", "breathing treatment"),
+        runs_in_short_bursts=True,
     ),
     # Small refrigerators run roughly 60-100 W while the compressor is on and cycle about a
     # third of the time. USDA: a closed refrigerator keeps food cold for about 4 hours.
@@ -289,6 +302,7 @@ _DEVICES: tuple[DeviceSpec, ...] = (
         description="Keeps insulin and other medicines cold. A closed fridge stays cold for about "
         "4 hours; check each medicine's label for how long it can be kept at room temperature.",
         keywords=("fridge", "refrigerator", "insulin", "medication cooler", "vaccine"),
+        runs_in_short_bursts=True,
     ),
     # Peritoneal dialysis cyclers warm the fluid with a heater; makers don't publish average
     # draw. 200 W while running overnight (about 40% of the day) is a cautious estimate. Home
@@ -306,7 +320,8 @@ _DEVICES: tuple[DeviceSpec, ...] = (
         internal_battery_wh=0,
         duty_cycle=0.4,
         ac_powered=True,
-        description="Counted as running overnight (about 40% of the day). Ask your dialysis "
+        description="Runs overnight (about 40% of the day). The outage countdown counts it at its "
+        "full draw, because the power can go out just as a treatment starts. Ask your dialysis "
         "center now what to do in an outage: many peritoneal patients can do manual exchanges, "
         "and centers keep emergency plans. Check the manual for your machine's power use.",
         keywords=("dialysis", "cycler", "peritoneal", "hemodialysis", "nxstage", "homechoice"),
