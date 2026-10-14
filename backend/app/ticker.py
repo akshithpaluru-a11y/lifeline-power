@@ -16,7 +16,7 @@ from sqlalchemy.orm.exc import StaleDataError
 from app import models
 from app.db import Database
 from app.events import EventBroker, MilestoneData, MissedCheckInData
-from app.outage_engine import mark_due, missed_check_in_minutes
+from app.outage_engine import mark_due, missed_check_in_alerts_covered, missed_check_in_minutes
 from app.services.outages import OutageLocks, dump_milestones, load_milestones
 from app.timeutil import Clock
 
@@ -99,7 +99,9 @@ class OutageTicker:
             if newly_passed:
                 outage.milestones = dump_milestones(milestones)
             if overdue is not None:
-                outage.missed_check_in_alerts += 1
+                # Count every 15-minute interval this alert covers, not just one: after a gap in
+                # ticking (a restart, a sleeping host) one alert goes out, not a burst of them.
+                outage.missed_check_in_alerts = missed_check_in_alerts_covered(overdue)
             await session.commit()
 
         for milestone in newly_passed:

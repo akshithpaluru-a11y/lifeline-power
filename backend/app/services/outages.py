@@ -41,7 +41,16 @@ from app.timeutil import Clock
 
 HELP_LOOKUP_BUDGET_SECONDS = 3.0
 """Longest starting an outage waits to find the nearest help site (otherwise: 30 min travel)."""
+HELP_SEARCH_RADII_KM = (15.0, 50.0)
+"""Where to look for a place with power: nearby first, then (rural homes) further out."""
 HISTORY_LIMIT = 200
+MAX_ACKS_PER_CAREGIVER = 5
+"""Only each caregiver's most recent acknowledgements are kept on an outage.
+
+The outage, acks included, goes out with every event and response, so a retrying or misbehaving
+client must not be able to grow it without bound. A caregiver's latest message and arrival time
+are what the family needs.
+"""
 
 
 class OutageLocks:
@@ -201,8 +210,9 @@ class OutageService:
         """Record that the owner checked in, and recompute the plan and milestones.
 
         Battery levels are estimated from the time since the last plan, then overwritten with
-        anything the owner reported. Device settings changed during the outage (such as saver
-        mode) are picked up too.
+        anything the owner reported. A device reading fuller than estimated was running on a
+        shared battery, which is charged for that energy (see `advance_state`). Device settings
+        changed during the outage (such as saver mode) are picked up too.
         """
         device_charge = {r.device_id: r.charge_percent for r in body.devices or ()}
         backup_levels = {
@@ -218,7 +228,7 @@ class OutageService:
             old_plan = schemas.Plan.model_validate(outage.plan)
             elapsed = outage_minutes_between(old_plan.computed_at, now, outage.speed)
             devices, backups = _load_energy_state(outage.energy_state)
-            devices, backups = advance_state(devices, backups, old_plan, elapsed)
+            devices, backups = advance_state(devices, backups, old_plan, elapsed, device_charge)
             devices, backups = merge_with_household(
                 devices,
                 backups,
@@ -254,7 +264,10 @@ class OutageService:
     async def ack(
         self, household_id: str, caregiver: Principal, body: schemas.AckRequest
     ) -> schemas.Outage:
-        """Record a caregiver's acknowledgement ("On my way")."""
+        """Record a caregiver's acknowledgement ("On my way").
+
+        Only the caregiver's `MAX_ACKS_PER_CAREGIVER` most recent acknowledgements are kept.
+        """
         assert caregiver.caregiver_id is not None and caregiver.caregiver_name is not None
         async with self._locks(household_id):
             outage = await self._require_active(household_id)
@@ -265,6 +278,12 @@ class OutageService:
                 eta_minutes=body.eta_minutes,
                 at=self._clock(),
             )
+            earlier = sorted(
+                (a for a in outage.acks if a.caregiver_id == caregiver.caregiver_id),
+                key=lambda a: (a.at, a.id),
+            )
+            for old in earlier[: max(0, len(earlier) - MAX_ACKS_PER_CAREGIVER + 1)]:
+                outage.acks.remove(old)  # deleted with the commit (delete-orphan)
             outage.acks.append(ack)
             await self._session.commit()
 
@@ -301,15 +320,29 @@ class OutageService:
         return view
 
     async def _help_target(self, household: models.Household) -> HelpTarget:
-        """The nearest place likely to have power, if we can find it quickly."""
+        """The nearest place likely to have power, if we can find it quickly.
+
+        When OpenStreetMap answers but nothing within 15 km is likely to have power (common in
+        rural areas, where the only nearby place may be a library), we look again within 50 km
+        so `leave_by` allows for the real drive. If that fails too, the drive is at least the
+        distance searched (see `HelpTarget.from_sites`). Both lookups share one time budget.
+        """
         if household.lat is None or household.lon is None:
             return HelpTarget.from_sites([])
+        sites: list[schemas.HelpSite] = []
+        searched_km: float | None = None
         try:
             async with asyncio.timeout(HELP_LOOKUP_BUDGET_SECONDS):
-                result = await self._help_sites.find(household.lat, household.lon)
+                for radius_km in HELP_SEARCH_RADII_KM:
+                    result = await self._help_sites.find(household.lat, household.lon, radius_km)
+                    if result.source != "openstreetmap":
+                        break  # the map service didn't answer: keep what we already know
+                    sites, searched_km = result.sites, radius_km
+                    if any(site.likely_has_power for site in sites):
+                        break
         except TimeoutError:
-            return HelpTarget.from_sites([])
-        return HelpTarget.from_sites(result.sites)
+            pass  # use whatever the lookups found before time ran out
+        return HelpTarget.from_sites(sites, searched_km)
 
 
 def _check_ids(reported: dict[str, Any], known: set[str], what: str) -> None:
