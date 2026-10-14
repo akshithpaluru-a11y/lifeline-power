@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import { Navigate } from 'react-router-dom'
+import { Navigate, useNavigate } from 'react-router-dom'
 import { AnimatePresence, motion } from 'motion/react'
-import { Car, Check, MapPin, PlugZap, ShieldCheck, Zap, Flag, TriangleAlert, Clock } from 'lucide-react'
+import { Car, Check, MapPin, PlugZap, ShieldCheck, Zap, Flag, TriangleAlert, Clock, Phone } from 'lucide-react'
 import { api } from '../lib/api'
-import { getCaregiver } from '../lib/caregiver'
+import { getCaregiver, setCaregiver } from '../lib/caregiver'
 import { useNow } from '../lib/useNow'
 import { clock, hms, humanMinutes } from '../lib/format'
 import { criticalLeft } from '../lib/time'
@@ -18,6 +18,7 @@ import { PulseTrace } from '../components/PulseTrace'
 
 export default function Live() {
   const me = getCaregiver()
+  const nav = useNavigate()
   const [h, setH] = useState<Household | null>(null)
   const [plan, setPlan] = useState<Plan | null>(null)
   const [outage, setOutage] = useState<Outage | null>(null)
@@ -46,7 +47,9 @@ export default function Live() {
         case 'outage_ended': setOutage(null); setEnded(e.data.outage); stopAlarm(); break
       }
     }
-    const stop = api.stream(me.household_id, me.token, onEvent)
+    // The owner removed this caregiver: their link no longer works, so send them back to join.
+    const revoked = () => { stopAlarm(); setCaregiver(null); nav('/join?removed=1', { replace: true }) }
+    const stop = api.stream(me.household_id, me.token, onEvent, revoked)
     return () => { stop(); stopAlarm() }
   }, [me?.token])
 
@@ -133,6 +136,8 @@ function OutageView({ outage, h, now, missed }: { outage: Outage; h: Household; 
   const t = hms(left * 60_000)
   const elapsed = hms((now - new Date(outage.started_at).getTime()) * outage.speed)
   const drill = outage.drill ?? outage.source === 'drill'
+  const noTime = outage.milestones.find((m) => m.key === 'leave_by' && m.severity === 'critical')
+    ?? (outage.plan.critical_runtime_minutes === 0 && bottleneck ? { title: `${first}’s ${bottleneck.label} has no power`, detail: 'It has no battery or backup that can run it. Call or go now, and call 911 if you can’t reach them.' } : undefined)
 
   const events = [
     { at: outage.started_at, icon: Zap, text: outage.source === 'charging_lost' ? 'Power cut detected at home' : drill ? 'Drill started' : 'Outage mode started', tone: 'text-alert' },
@@ -152,6 +157,14 @@ function OutageView({ outage, h, now, missed }: { outage: Outage; h: Household; 
         <div className="mt-4 flex items-center gap-3 rounded-2xl bg-alert/10 p-3.5 ring-1 ring-inset ring-alert/25">
           <TriangleAlert size={18} className="shrink-0 text-alert" />
           <span className="text-[13.5px]">{first} hasn’t checked in for {Math.round(missed)} min. Call or go now.</span>
+        </div>
+      )}
+
+      {noTime && (
+        <div className="mt-4 rounded-2xl bg-alert/15 p-4 ring-1 ring-inset ring-alert/40">
+          <div className="flex items-center gap-2 text-[15px] font-semibold text-alert"><TriangleAlert size={18} className="shrink-0" /> {noTime.title}</div>
+          <p className="mt-1.5 text-[13px] leading-relaxed text-fg-2">{noTime.detail}</p>
+          <a href="tel:911" className="mt-3 flex items-center justify-center gap-2 rounded-xl bg-alert py-2.5 text-[14px] font-semibold text-ink-950"><Phone size={15} /> Call 911</a>
         </div>
       )}
 

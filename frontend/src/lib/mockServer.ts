@@ -200,18 +200,24 @@ export const mock = {
   async removeCaregiver(id: string, token: string | null, cgId: string) {
     const db = load(); auth(db, token, id, true)
     const h = db.households[id]
-    touch(db, { ...h, caregivers: h.caregivers.filter((c) => c.id !== cgId) })
+    // Like the server: their token stops working and the old code is replaced.
+    for (const [k, v] of Object.entries(db.tokens)) if (v.caregiver_id === cgId) delete db.tokens[k]
+    touch(db, { ...h, caregivers: h.caregivers.filter((c) => c.id !== cgId), join_code: code() })
   },
 
-  stream(id: string, token: string | null, cb: (e: StreamEvent) => void) {
-    const f = (hh: string, e: StreamEvent) => { if (hh === id) cb(e) }
+  stream(id: string, token: string | null, cb: (e: StreamEvent) => void, onRevoked?: () => void) {
+    const f = (hh: string, e: StreamEvent) => {
+      if (hh !== id) return
+      if (token && !load().tokens[token]) { local.delete(f); onRevoked?.(); return }
+      cb(e)
+    }
     local.add(f)
     const db = load()
     try {
       auth(db, token, id)
       const o = current(db, id)
       setTimeout(() => cb({ event: 'snapshot', data: { household: db.households[id], outage: o ? withMilestones(db.households[id], o) : null } }), 0)
-    } catch { /* stream stays silent */ }
+    } catch { setTimeout(() => onRevoked?.(), 0) }
     return () => { local.delete(f) }
   },
 

@@ -52,8 +52,11 @@ export default function Outage() {
   const t = hms(left * 60_000)
   const elapsed = hms((now - new Date(outage.started_at).getTime()) * outage.speed)
   const urgent = left < 60
-  const upcoming = outage.milestones.filter((m) => new Date(m.at).getTime() > now && m.key !== 'depleted').slice(0, 3)
+  const emptyAt = outage.milestones.find((m) => m.key === 'depleted')?.at
+  const upcoming = outage.milestones.filter((m) => new Date(m.at).getTime() > now && m.key !== 'depleted' && (!emptyAt || m.at <= emptyAt)).slice(0, 3)
   const leaveBy = outage.milestones.find((m) => m.key === 'leave_by')
+  const noTime = leaveBy?.severity === 'critical' ? leaveBy
+    : outage.plan.critical_runtime_minutes === 0 && primary ? { title: `${primary.d.label} has no power`, detail: 'It has no battery or backup that can run it. Get to a place with power now, or call 911.' } : null
   const shareUrl = `${location.origin}/join?code=${h.join_code}`
 
   const silence = () => { stopAlarm(); setMuted(true) }
@@ -97,6 +100,14 @@ export default function Outage() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {noTime && (
+        <div className="relative mt-3 rounded-2xl bg-alert/15 p-4 ring-1 ring-inset ring-alert/40">
+          <div className="flex items-center gap-2 text-[15px] font-semibold text-alert"><TriangleAlert size={18} className="shrink-0" /> {noTime.title}</div>
+          <p className="mt-1.5 text-[13px] leading-relaxed text-fg-2">{noTime.detail}</p>
+          <a href="tel:911" className="mt-3 flex items-center justify-center gap-2 rounded-xl bg-alert py-2.5 text-[14px] font-semibold text-ink-950"><Phone size={15} /> Call 911</a>
+        </div>
+      )}
 
       {primary && (
         <motion.div className="relative mt-4 flex justify-center" initial={{ scale: 0.92, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={{ duration: 0.9, ease: [0.16, 1, 0.3, 1] }}>
@@ -191,7 +202,7 @@ export default function Outage() {
             <span className="grid size-10 place-items-center rounded-xl bg-sky/15 text-sky"><MapPin size={18} /></span>
             <span className="min-w-0 flex-1">
               <span className="block truncate text-[13.5px] font-medium">{site.name}</span>
-              <span className="block text-[12px] text-fg-3">{site.travel_minutes} min away{site.likely_has_power ? ' · has backup power' : ''}{leaveBy && !drill ? ` · leave by ${clock(leaveBy.at)}` : ''}</span>
+              <span className="block text-[12px] text-fg-3">{site.travel_minutes} min away{site.likely_has_power ? ' · has backup power' : ''}{leaveBy && !noTime && !drill ? ` · leave by ${clock(leaveBy.at)}` : ''}</span>
             </span>
             <Navigation size={16} className="text-fg-3" />
           </a>

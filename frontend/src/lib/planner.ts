@@ -96,11 +96,13 @@ export function computeMilestones(plan: Plan, startedAt: number, speed: number, 
     { key: 'power_lost', at: at(0), title: 'Power lost', detail: 'Alarm sounded and caregivers alerted.', severity: 'info', passed: true },
     { key: 'conserve', at: at(0), title: 'Save battery', detail: 'Switch devices to low-power settings and unplug anything you don’t need.', severity: 'info', passed: true },
   ]
+  const leave = crit - travelMinutes - 30
   if (crit > 0) {
+    // Same as the server: when the battery can't last the drive, say so up front.
+    if (crit <= travelMinutes) m.push({ key: 'leave_by', at: at(0), title: 'Not enough battery to reach power', detail: `The battery won’t last the ${travelMinutes} min drive to ${siteName}. Call 911 now.`, severity: 'critical', passed: false })
     m.push({ key: 'check_in', at: at(Math.min(60, crit / 2)), title: 'Check in', detail: 'Tap “I’m OK” so your family knows.', severity: 'info', passed: false })
-    m.push({ key: 'halfway', at: at(crit / 2), title: 'Halfway', detail: 'Half the critical battery is gone.', severity: 'warning', passed: false })
-    const leave = Math.max(0, crit - travelMinutes - 30)
-    m.push({ key: 'leave_by', at: at(leave), title: 'Leave for a powered location', detail: `Head to ${siteName} (${travelMinutes} min away) before batteries get low.`, severity: 'warning', passed: false })
+    if (crit / 2 < leave) m.push({ key: 'halfway', at: at(crit / 2), title: 'Halfway', detail: 'Half the critical battery is gone.', severity: 'warning', passed: false })
+    else m.push({ key: 'leave_by', at: at(Math.max(0, leave)), title: 'Leave for a powered location', detail: `Head to ${siteName} (${travelMinutes} min away) before batteries get low.`, severity: 'warning', passed: false })
     m.push({ key: 'critical_low', at: at(Math.max(0, crit - 30)), title: '30 minutes left', detail: 'Call 911 if you can’t reach power.', severity: 'critical', passed: false })
     m.push({ key: 'depleted', at: at(crit), title: 'Battery empty', detail: 'Life-sustaining battery runs out.', severity: 'critical', passed: false })
   }

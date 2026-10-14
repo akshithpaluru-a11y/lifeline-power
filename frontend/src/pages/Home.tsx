@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Link, useNavigate, useOutletContext } from 'react-router-dom'
 import { motion } from 'motion/react'
-import { BellRing, ChevronRight, IdCard, MapPin, Plug, PlugZap, Unplug, TrendingUp, BatteryCharging, Users, ShieldCheck, Leaf } from 'lucide-react'
+import { BellRing, ChevronRight, IdCard, MapPin, Plug, PlugZap, Unplug, TrendingUp, BatteryCharging, Users, ShieldCheck, Leaf, TriangleAlert } from 'lucide-react'
 import { useStore, saveDevice } from '../lib/store'
 import { humanMinutes } from '../lib/format'
 import { DeviceIcon } from '../components/DeviceIcon'
@@ -49,7 +49,7 @@ export default function Home() {
     if (r.kind === 'location') return nav('/app/help')
     return nav('/app/devices')
   }
-  const recIcon = { saver_mode: Leaf, add_backup: BatteryCharging, charge: BatteryCharging, register_program: ShieldCheck, caregiver: Users, location: MapPin }
+  const recIcon = { saver_mode: Leaf, add_backup: BatteryCharging, charge: BatteryCharging, register_program: ShieldCheck, caregiver: Users, location: MapPin, safety: TriangleAlert }
 
   return (
     <div className="space-y-4 pt-2">
@@ -82,7 +82,7 @@ export default function Home() {
           <h2 className="text-[15px] font-semibold tracking-tight">If the power went out now</h2>
           <Link to="/app/devices" className="text-[12.5px] text-fg-3 hover:text-fg">Edit</Link>
         </div>
-        {crit != null && bottleneck && (
+        {crit != null && bottleneck && (crit > 0 ? (
           <div className="mt-4 flex items-end justify-between gap-4 rounded-2xl bg-amber/[0.06] p-4 ring-1 ring-inset ring-amber/15">
             <div>
               <div className="text-[11.5px] font-medium uppercase tracking-[0.12em] text-amber/80">Life support lasts</div>
@@ -90,7 +90,15 @@ export default function Home() {
             </div>
             <div className="text-right text-[12px] leading-snug text-fg-3">limited by<br /><span className="text-fg-2">{bottleneck.label}</span></div>
           </div>
-        )}
+        ) : (
+          <div className="mt-4 flex items-start gap-3 rounded-2xl bg-alert/[0.08] p-4 ring-1 ring-inset ring-alert/20">
+            <TriangleAlert size={18} className="mt-0.5 shrink-0 text-alert" />
+            <div>
+              <div className="text-[14px] font-semibold text-alert">{bottleneck.label} stops when the power does</div>
+              <p className="mt-1 text-[12.5px] leading-relaxed text-fg-3">It has no battery and no backup that can run it. Add a power station or generator, or plan where to go.</p>
+            </div>
+          </div>
+        ))}
         <ul className="mt-4 space-y-4">
           {rows.map(({ d, p }) => {
             const total = p?.total_minutes ?? 0
@@ -110,6 +118,7 @@ export default function Home() {
                     {own > 0 && <motion.span className={`h-full ${d.life_sustaining ? 'bg-amber' : 'bg-fg-3'}`} initial={{ width: 0 }} animate={{ width: `${(own / max) * 100}%` }} transition={{ duration: 1, ease: [0.16, 1, 0.3, 1] }} />}
                     {total > own && <motion.span className="h-full bg-sky" initial={{ width: 0 }} animate={{ width: `${((total - own) / max) * 100}%` }} transition={{ duration: 1, delay: 0.15, ease: [0.16, 1, 0.3, 1] }} />}
                   </div>
+                  {p?.status_detail && <p className={`mt-1.5 text-[11.5px] leading-snug ${p.status === 'ok' ? 'text-fg-4' : 'text-amber/90'}`}>{p.status_detail}</p>}
                 </div>
               </li>
             )

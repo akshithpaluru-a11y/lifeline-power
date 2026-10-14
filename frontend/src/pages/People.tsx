@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { motion } from 'motion/react'
-import { Check, Copy, Share2, X, Bell, Car, Eye } from 'lucide-react'
+import { Check, Copy, Share2, X, Bell, Car, Eye, RefreshCw } from 'lucide-react'
 import { useStore, removeCaregiver } from '../lib/store'
 import { ago } from '../lib/format'
 import { Qr } from '../components/Qr'
@@ -11,6 +11,8 @@ const HUES = ['from-[#FFB224] to-[#FF7A1C]', 'from-[#7CB7FF] to-[#4F7BFF]', 'fro
 export default function People() {
   const h = useStore((s) => s.household)!
   const [copied, setCopied] = useState(false)
+  const [rotated, setRotated] = useState<string | null>(null)
+  const remove = async (id: string, name: string) => { await removeCaregiver(id); setRotated(name) }
   const url = `${location.origin}/join?code=${h.join_code}`
   const share = async () => {
     const text = `Join ${h.patient_first_name}'s LifeLine so you get an alert if the power goes out. Code: ${h.join_code}`
@@ -39,6 +41,13 @@ export default function People() {
           </button>
         </div>
       </motion.section>
+      {rotated && (
+        <motion.div initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} className="mt-3 flex items-start gap-3 rounded-2xl bg-amber/[0.08] p-3.5 ring-1 ring-inset ring-amber/20">
+          <RefreshCw size={16} className="mt-0.5 shrink-0 text-amber" />
+          <p className="flex-1 text-[13px] leading-relaxed text-fg-2">{rotated} was removed, so the family code changed to keep them out. Share the new code with everyone who still needs it. People already joined stay connected.</p>
+          <button onClick={() => setRotated(null)} className="text-fg-4 hover:text-fg" aria-label="Dismiss"><X size={15} /></button>
+        </motion.div>
+      )}
 
       <h2 className="mt-7 text-[12px] font-medium uppercase tracking-[0.14em] text-fg-3">Caregivers · {h.caregivers.length}</h2>
       {h.caregivers.length ? (
@@ -50,7 +59,7 @@ export default function People() {
                 <span className="block truncate text-[14.5px] font-medium">{c.name}</span>
                 <span className="block text-[12.5px] text-fg-3">{c.relationship || 'Caregiver'} · joined {ago(c.joined_at)}</span>
               </span>
-              <button onClick={() => removeCaregiver(c.id)} className="grid size-8 place-items-center rounded-full text-fg-4 hover:bg-white/5 hover:text-fg" aria-label={`Remove ${c.name}`}><X size={15} /></button>
+              <button onClick={() => remove(c.id, c.name)} className="grid size-8 place-items-center rounded-full text-fg-4 hover:bg-white/5 hover:text-fg" aria-label={`Remove ${c.name}`}><X size={15} /></button>
             </div>
           ))}
         </div>

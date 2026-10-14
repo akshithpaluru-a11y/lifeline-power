@@ -45,6 +45,7 @@ export default function Join() {
           </label>
           <Field label="Your name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Maya" />
           <Field label="Relationship" value={rel} onChange={(e) => setRel(e.target.value)} placeholder="Daughter, neighbor, nurse…" />
+          {!err && q.get('removed') && <p className="rounded-xl bg-white/[0.04] p-3 text-[13px] leading-relaxed text-fg-2 ring-1 ring-inset ring-white/10">You’re no longer connected to that home. Ask them for their new family code to join again.</p>}
           {err && <p className="rounded-xl bg-alert/10 p-3 text-[13px] text-alert ring-1 ring-inset ring-alert/20">{err}</p>}
         </motion.div>
         <Button size="lg" className="mt-auto w-full" disabled={busy || code.length !== 6 || !name.trim()} onClick={join}>

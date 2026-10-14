@@ -1,10 +1,10 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { motion } from 'motion/react'
 import { Camera, Leaf, Plus, ScanLine, Sparkles, Trash2 } from 'lucide-react'
 import { useStore, saveDevice, deleteDevice, saveBackup, deleteBackup } from '../lib/store'
 import { useCatalog } from '../lib/useCatalog'
 import { humanMinutes } from '../lib/format'
-import { api } from '../lib/api'
+import { aiEnabled, api } from '../lib/api'
 import type { BackupSource, Device } from '../lib/types'
 import { BackupIcon, DeviceIcon } from '../components/DeviceIcon'
 import { Segments } from '../components/Segments'
@@ -48,10 +48,11 @@ export default function Devices() {
                   {Math.round(p?.effective_draw_watts ?? d.draw_watts)} W · {d.internal_battery_wh + d.spare_batteries_wh ? `${d.internal_battery_wh + d.spare_batteries_wh} Wh · ${d.charge_percent}%` : 'no battery'}
                 </span>
                 {d.internal_battery_wh > 0 && <Segments value={d.charge_percent / 100} count={24} tone={d.charge_percent < 30 ? 'alert' : 'live'} className="mt-2.5 h-1" />}
+                {p?.status_detail && <span className={`mt-2 block text-[12px] leading-snug ${p.status === 'ok' ? 'text-fg-4' : 'text-amber/90'}`}>{p.status_detail}</span>}
               </span>
               <span className="shrink-0 text-right">
                 <span className={`tnum block text-[17px] font-semibold ${!p?.total_minutes ? 'text-alert' : ''}`}>{p?.total_minutes ? humanMinutes(p.total_minutes) : '0m'}</span>
-                <span className="text-[11px] text-fg-4">{p?.allocations.length ? 'with backup' : 'on battery'}</span>
+                <span className={`text-[11px] ${p?.status === 'limited' ? 'text-amber/90' : 'text-fg-4'}`}>{p?.status === 'limited' ? 'limited' : p?.status === 'no_backup' ? 'no backup' : p?.allocations.length ? 'with backup' : 'on battery'}</span>
               </span>
             </motion.button>
           )
@@ -104,6 +105,8 @@ export function DeviceForm({ value, onDone, onSubmit }: { value: DraftDevice; on
   const [scanNote, setScanNote] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const file = useRef<HTMLInputElement>(null)
+  const [ai, setAi] = useState(false)
+  useEffect(() => { aiEnabled().then(setAi) }, [])
   const set = <K extends keyof Device>(k: K, v: Device[K]) => setD((x) => ({ ...x, [k]: v }))
   const tmpl = catalog.find((c) => c.kind === d.kind)
 
@@ -131,10 +134,10 @@ export function DeviceForm({ value, onDone, onSubmit }: { value: DraftDevice; on
       <div className="rounded-2xl bg-gradient-to-b from-amber/[0.08] to-transparent p-3.5 ring-1 ring-inset ring-amber/15">
         <div className="flex items-center gap-2 text-[12px] font-medium text-amber"><Sparkles size={13} /> Fill it in from the label</div>
         <div className="mt-2.5 flex gap-2">
-          <input value={scan} onChange={(e) => setScan(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && identify()} placeholder="e.g. Inogen One G5"
+          <input value={scan} maxLength={500} onChange={(e) => setScan(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && identify()} placeholder="e.g. Inogen One G5"
             className="h-10 min-w-0 flex-1 rounded-xl bg-white/[0.05] px-3 text-[14px] outline-none ring-1 ring-inset ring-white/10 placeholder:text-fg-4 focus:ring-amber/50" />
           <button onClick={identify} disabled={busy} className="grid size-10 place-items-center rounded-xl bg-amber text-ink-950 disabled:opacity-50" aria-label="Look up model"><ScanLine size={17} /></button>
-          <button onClick={() => file.current?.click()} disabled={busy} className="grid size-10 place-items-center rounded-xl bg-white/[0.06] ring-1 ring-inset ring-white/10" aria-label="Photo of label"><Camera size={17} /></button>
+          {ai && <button onClick={() => file.current?.click()} disabled={busy} className="grid size-10 place-items-center rounded-xl bg-white/[0.06] ring-1 ring-inset ring-white/10" aria-label="Photo of label"><Camera size={17} /></button>}
           <input ref={file} type="file" accept="image/*" capture="environment" hidden onChange={(e) => e.target.files?.[0] && photo(e.target.files[0])} />
         </div>
         {scanNote && <p className="mt-2 text-[11.5px] leading-snug text-fg-3">{scanNote}</p>}

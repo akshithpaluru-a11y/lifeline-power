@@ -7,12 +7,19 @@ export { ApiError }
 // in-browser mock, so the app always works (offline, in demos, before the backend ships).
 
 let mode: Promise<'live' | 'mock'> | null = null
+let ai = false
 export function apiMode() {
   mode ??= fetch('/api/health', { signal: AbortSignal.timeout(1500) })
-    .then(async (r) => (r.ok && (await r.json()).ok ? 'live' as const : 'mock' as const))
+    .then(async (r) => {
+      const j = r.ok ? await r.json() : null
+      ai = !!j?.ai_enabled
+      return j?.ok ? 'live' as const : 'mock' as const
+    })
     .catch(() => 'mock' as const)
   return mode
 }
+/** True when the server can read label photos (it has an AI key). */
+export const aiEnabled = () => apiMode().then(() => ai)
 
 async function http<T>(method: string, path: string, token: string | null, body?: unknown): Promise<T> {
   const r = await fetch(`/api${path}`, {
@@ -58,10 +65,16 @@ const live = {
     if (!r.ok) throw new ApiError(r.status, 'error', 'Could not read the label')
     return r.json()
   },
-  stream(id: string, token: string | null, cb: (e: StreamEvent) => void) {
+  stream(id: string, token: string | null, cb: (e: StreamEvent) => void, onRevoked?: () => void) {
     const es = new EventSource(`/api/households/${id}/stream?token=${encodeURIComponent(token ?? '')}`)
     const names: StreamEvent['event'][] = ['snapshot', 'outage_started', 'milestone', 'check_in', 'missed_check_in', 'ack', 'outage_ended', 'household_updated']
     names.forEach((n) => es.addEventListener(n, (m) => cb({ event: n, data: JSON.parse((m as MessageEvent).data) } as StreamEvent)))
+    // EventSource hides status codes, so on a drop ask once whether the token still works.
+    es.onerror = () => {
+      fetch(`/api/households/${id}`, { headers: { authorization: `Bearer ${token ?? ''}` } })
+        .then((r) => { if (r.status === 401 || r.status === 403 || r.status === 404) { es.close(); onRevoked?.() } })
+        .catch(() => {})
+    }
     return () => es.close()
   },
 }
@@ -73,9 +86,9 @@ type Mocked = Omit<Live, 'identifyPhoto'> & { identifyPhoto?: Live['identifyPhot
 export const api = new Proxy({} as Live, {
   get(_, key: keyof Live) {
     if (key === 'stream') {
-      return (id: string, t: string | null, cb: (e: StreamEvent) => void) => {
+      return (id: string, t: string | null, cb: (e: StreamEvent) => void, onRevoked?: () => void) => {
         let stop: (() => void) | null = null, dead = false
-        apiMode().then((m) => { if (!dead) stop = (m === 'live' ? live : (mock as unknown as Mocked)).stream(id, t, cb) })
+        apiMode().then((m) => { if (!dead) stop = (m === 'live' ? live : (mock as unknown as Mocked)).stream(id, t, cb, onRevoked) })
         return () => { dead = true; stop?.() }
       }
     }

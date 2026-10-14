@@ -92,11 +92,12 @@ export interface PlanDevice {
   total_minutes: number
   allocations: { backup_id: string; energy_wh: number; minutes: number }[]
   status: 'ok' | 'limited' | 'no_backup'
+  status_detail?: string | null
 }
 
 export interface Recommendation {
   id: string
-  kind: 'saver_mode' | 'add_backup' | 'charge' | 'register_program' | 'caregiver' | 'location'
+  kind: 'saver_mode' | 'add_backup' | 'charge' | 'register_program' | 'caregiver' | 'location' | 'safety'
   title: string
   detail: string
   gain_minutes: number | null
@@ -108,7 +109,7 @@ export interface Plan {
   critical_runtime_minutes: number | null
   bottleneck_device_id: string | null
   devices: PlanDevice[]
-  backups: { backup_id: string; usable_wh: number; allocated_wh: number; unused_wh: number }[]
+  backups: { backup_id: string; usable_wh: number; allocated_wh: number; unused_wh: number; fuel_minutes?: number | null }[]
   recommendations: Recommendation[]
   assumptions: string[]
 }
@@ -142,6 +143,7 @@ export interface Outage {
   milestones: Milestone[]
   acks: Ack[]
   last_check_in_at: string | null
+  last_check_in_ok?: boolean | null
   speed: number
   drill?: boolean
 }

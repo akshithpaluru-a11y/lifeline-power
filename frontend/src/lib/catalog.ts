@@ -7,7 +7,7 @@ const t = (kind: string, name: string, category: DeviceTemplate['category'], ico
   ({ kind, name, category, icon, life_sustaining_default: life, typical_draw_watts: draw, saver_draw_watts: saver, saver_tip, internal_battery_wh: battery, duty_cycle: duty, ac_powered: ac, description })
 
 export const DEVICE_CATALOG: DeviceTemplate[] = [
-  t('oxygen_concentrator_home', 'Home oxygen concentrator', 'breathing', 'oxygen', true, 300, 180, 0, 1, true, 'Stationary concentrators plug into the wall and have no battery.', 'Ask your care team ahead of time if a lower flow setting is safe for you.'),
+  t('oxygen_concentrator_home', 'Home oxygen concentrator', 'breathing', 'oxygen', true, 300, null, 0, 1, true, 'Stationary concentrators plug into the wall and have no battery.', 'Ask your care team ahead of time if a lower flow setting is safe for you.'),
   t('oxygen_concentrator_portable', 'Portable oxygen concentrator', 'breathing', 'oxygen_portable', true, 40, 25, 99, 1, false, 'Battery-powered unit, pulse-dose setting 2.', 'Pulse mode instead of continuous flow uses far less power, if your clinician allows it.'),
   t('home_ventilator', 'Home ventilator', 'breathing', 'ventilator', true, 30, null, 90, 1, true, 'Most home ventilators have an internal and a detachable battery.'),
   t('cpap_bipap', 'CPAP or BiPAP', 'breathing', 'cpap', false, 55, 15, 0, 1, true, 'Heated humidifier uses most of the power.', 'Turn the heated humidifier off during an outage.'),
