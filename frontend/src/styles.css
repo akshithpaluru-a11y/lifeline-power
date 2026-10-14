@@ -1,0 +1,76 @@
+@import "tailwindcss";
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+
+@theme {
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, monospace;
+
+  --color-ink-950: #08090a;
+  --color-ink-900: #0e100f;
+  --color-ink-850: #131614;
+  --color-ink-800: #191c1a;
+  --color-ink-700: #23272a;
+  --color-ink-600: #30353a;
+
+  --color-fg: #f3f2ed;
+  --color-fg-2: #b9bbb5;
+  --color-fg-3: #7e827d;
+  --color-fg-4: #55595a;
+
+  --color-amber: #ffb224;
+  --color-amber-hi: #ffd36b;
+  --color-amber-lo: #ff8a1c;
+  --color-live: #3ddc97;
+  --color-alert: #ff5a4e;
+  --color-sky: #7cb7ff;
+
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@layer base {
+  html { color-scheme: dark; -webkit-tap-highlight-color: transparent; }
+  body {
+    @apply bg-ink-950 text-fg font-sans antialiased;
+    font-feature-settings: "ss01", "cv11";
+    text-rendering: optimizeLegibility;
+  }
+  ::selection { background: color-mix(in oklab, var(--color-amber) 40%, transparent); }
+  :focus-visible { outline: 2px solid var(--color-amber); outline-offset: 2px; border-radius: 10px; }
+}
+
+@utility tnum { font-variant-numeric: tabular-nums; }
+
+/* Hairline surface used for cards: a 1px inner border that catches light at the top. */
+@utility surface {
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.035), rgb(255 255 255 / 0.01)) padding-box,
+    var(--color-ink-900);
+  box-shadow:
+    inset 0 0 0 1px rgb(255 255 255 / 0.06),
+    inset 0 1px 0 0 rgb(255 255 255 / 0.06),
+    0 1px 2px rgb(0 0 0 / 0.4);
+}
+
+@utility grain {
+  position: relative;
+  &::after {
+    content: "";
+    position: absolute; inset: 0; pointer-events: none; opacity: .05; mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+}
+
+@keyframes ping-soft { 0% { transform: scale(1); opacity: .55 } 100% { transform: scale(2.6); opacity: 0 } }
+@keyframes sweep { from { transform: translateX(-100%) } to { transform: translateX(100%) } }
+@keyframes dash { to { stroke-dashoffset: 0 } }
+
+.leaflet-container { background: var(--color-ink-900); font-family: var(--font-sans); }
+.leaflet-control-attribution { background: rgb(8 9 10 / .7) !important; color: var(--color-fg-4) !important; font-size: 9px; }
+.leaflet-control-attribution a { color: var(--color-fg-3) !important; }
+.leaflet-control-zoom a { background: var(--color-ink-800) !important; color: var(--color-fg) !important; border-color: rgb(255 255 255 / .08) !important; }
+
+@media print {
+  body { background: white; color: black; }
+  .no-print { display: none !important; }
+}
