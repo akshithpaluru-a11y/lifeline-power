@@ -118,7 +118,18 @@ Timestamps carry milliseconds: `2026-10-20T18:04:11.250Z` (still ISO 8601 UTC wi
 - `help-sites`: empty `lat=`, `lon=` or `radius_km=` count as not given. `lat` and `lon` must be given together; `radius_km` is 1 to 50. With no location
   at all the answer is `{ sites: [], source: "fallback", note }` with a note asking for one.
 - `medical-programs`: an unknown state code is a 400. With `utility`, only that utility's
-  programs are returned, so families are never pointed at another company's program.
+  programs are returned, so families are never pointed at another company's program. Long names
+  match only as the start of the typed name ("Entergy Louisiana LLC" matches Entergy; "Tacoma City
+  Light" does not match Seattle City Light). Names that sister companies in other states share
+  (National Grid, Ameren, Dominion, CenterPoint, PacifiCorp, PSEG / PSE&G, City Light) match only
+  when `state` is given. The same matching drives the plan's register_program step and the letter.
+- `help-sites`: an Overpass answer that reports a runtime error comes back as `source: "fallback"`
+  and isn't cached, so the next lookup retries.
+- `emergency-card`: the runtime line reads "At the charge levels last saved in the app, X lasts
+  about Y". Under a minute of runtime, it says the device has no battery or backup power and to
+  go somewhere with power right away or call 911.
+- Geocoding service errors aren't remembered, so the next save retries; a slow Census lookup is
+  abandoned after 2.5 s so Nominatim still gets a turn.
 - `medical-letter` names the utility's verified program and links its page when the household's
   `utility_name` matches one. The letter is dated in UTC.
 
@@ -127,4 +138,14 @@ Timestamps carry milliseconds: `2026-10-20T18:04:11.250Z` (still ISO 8601 UTC wi
   is a 503 `unavailable`; with `text` as well, the text is matched against the catalog instead.
   Photos must be JPEG, PNG, GIF or WebP under 5 MB (400 otherwise). `text` is at most 500
   characters in JSON and multipart alike; JSON bodies over 16 KB are a 400.
-- Figures Claude returns outside sane ranges are replaced with the catalog's typical values.
+- Figures Claude returns are checked against plausible ranges for that device kind: a draw that is
+  too low becomes the catalog's typical draw, a draw that is too high is capped at the kind's
+  maximum, a battery that is too large becomes the typical battery. Any correction lowers
+  `confidence` to `low` and the explanation says to check the label.
+- A typed name, or Claude's reading of a label, that matches a model with checked figures (e.g.
+  Trilogy 100, Inogen One G5, Inogen At Home, EverFlo, Astral, AirSense 10, SimplyGo) is answered
+  from that list. Typed names don't call Claude at all (`source: "catalog"`). Portable
+  concentrator figures assume the highest setting, so runtimes err short.
+- A photo's type is read from its bytes, not the declared content type. Bytes that aren't JPEG,
+  PNG, GIF or WebP are a 400, and a photo Claude can't read is a 400 ("We couldn't read that
+  photo"), not a 503.
