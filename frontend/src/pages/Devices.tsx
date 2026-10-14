@@ -4,7 +4,7 @@ import { Camera, Leaf, Plus, ScanLine, Sparkles, Trash2 } from 'lucide-react'
 import { useStore, saveDevice, deleteDevice, saveBackup, deleteBackup } from '../lib/store'
 import { useCatalog } from '../lib/useCatalog'
 import { humanMinutes } from '../lib/format'
-import { aiEnabled, api } from '../lib/api'
+import { aiEnabled, api, ApiError } from '../lib/api'
 import type { BackupSource, Device } from '../lib/types'
 import { BackupIcon, DeviceIcon } from '../components/DeviceIcon'
 import { Segments } from '../components/Segments'
@@ -112,7 +112,7 @@ export function DeviceForm({ value, onDone, onSubmit }: { value: DraftDevice; on
 
   const applyMatch = (r: Awaited<ReturnType<typeof api.identifyDevice>>) => {
     setD((x) => ({ ...fill(r.match.kind), id: x.id, ...Object.fromEntries(Object.entries(r.match).filter(([, v]) => v != null)) }))
-    setScanNote(`${r.explanation} (${r.confidence} confidence)`)
+    setScanNote(r.confidence === 'low' ? `Check the label: ${r.explanation}` : r.explanation)
   }
   const identify = async () => {
     if (!scan.trim()) return
@@ -121,7 +121,7 @@ export function DeviceForm({ value, onDone, onSubmit }: { value: DraftDevice; on
   }
   const photo = async (f: File) => {
     setBusy(true)
-    try { applyMatch(await api.identifyPhoto(f)) } catch { setScanNote('Reading photos needs the LifeLine server. Type the model name instead.') } finally { setBusy(false) }
+    try { applyMatch(await api.identifyPhoto(f)) } catch (e) { setScanNote(e instanceof ApiError && e.status === 400 ? e.message : 'Couldn’t read that photo. Type the model name instead.') } finally { setBusy(false) }
   }
 
   const save = async () => {

@@ -62,7 +62,10 @@ const live = {
   async identifyPhoto(file: File): Promise<IdentifyResult> {
     const f = new FormData(); f.append('image', file)
     const r = await fetch('/api/ai/identify-device', { method: 'POST', body: f })
-    if (!r.ok) throw new ApiError(r.status, 'error', 'Could not read the label')
+    if (!r.ok) {
+      const j = await r.json().catch(() => null)
+      throw new ApiError(r.status, j?.error?.code ?? 'error', j?.error?.message ?? 'Could not read the label')
+    }
     return r.json()
   },
   stream(id: string, token: string | null, cb: (e: StreamEvent) => void, onRevoked?: () => void) {
