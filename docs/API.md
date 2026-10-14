@@ -178,6 +178,7 @@ Planner rules the backend implements (documented so the UI can explain them):
   "id": "og_55Hk",
   "status": "active",                       // active | ended
   "source": "charging_lost",                // charging_lost | manual | drill
+  "drill": false,                           // true when source is "drill" (convenience flag)
   "started_at": "2026-10-20T18:04:11Z",
   "ended_at": null,
   "plan": { /* Plan snapshot, recomputed on check-in */ },
@@ -277,7 +278,7 @@ caregiver events are marked `drill: true`.
 ### Live events (Server-Sent Events)
 `GET /api/households/{id}/stream?token=<owner or caregiver token>`
 
-`text/event-stream`. Each message has an `event:` name and JSON `data:`. A `: ping` comment every
+`text/event-stream`. Each message has an `event:` name and a single-line JSON `data:` (one `data:` line per message). A `: ping` comment every
 15 s keeps the connection open. On connect the server immediately sends one `snapshot`.
 
 | event | data |
