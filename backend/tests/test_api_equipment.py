@@ -38,8 +38,8 @@ async def test_add_device_overrides(home: Home) -> None:
 
 
 async def test_catalog_saver_figure_is_dropped_when_it_no_longer_fits(home: Home) -> None:
-    # The catalog's concentrator saver figure is 250 W; this one only draws 120 W.
-    device = await home.add_device(kind="oxygen_concentrator_home", draw_watts=120)
+    # The catalog's CPAP saver figure is 10 W; this one only draws 8 W.
+    device = await home.add_device(kind="cpap_bipap", draw_watts=8)
     assert device["saver_draw_watts"] is None
 
 
@@ -165,7 +165,8 @@ async def test_caregiver_cannot_change_equipment(client: httpx.AsyncClient, home
 
 
 async def test_plan_endpoint(client: httpx.AsyncClient, home: Home) -> None:
-    o2 = await home.add_device(kind="oxygen_concentrator_home")
+    # The catalog has no saver figure for concentrators; this one's manual lists 250 W.
+    o2 = await home.add_device(kind="oxygen_concentrator_home", saver_draw_watts=250)
     station = await home.add_backup(type="power_station")
     _, token = await home.join()
 

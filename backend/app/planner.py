@@ -6,22 +6,28 @@ running once the grid goes down, and what the family could do to stretch that ti
 Everything here is a pure function: no database, network or clock. The caller passes in all the
 facts (including `now`) and gets back a `Plan`. The rules, also listed in `docs/API.md`:
 
-1. Effective draw = (saver draw if saver mode is on, else normal draw) x duty cycle.
+1. Effective draw = (saver draw if saver mode is on, else normal draw) x duty cycle. The
+   exception is a life-sustaining device that can run for hours at a stretch (an overnight
+   BiPAP, a dialysis cycler): the power can go out just as it is switched on, so it is counted
+   at its full draw and the countdown can't run hours past the moment its battery dies.
 2. Each device first uses its own internal and spare batteries (x charge %, 90% usable).
 3. Shared battery backups (power stations, UPS units) are split to maximise the shortest
    runtime among life-sustaining devices ("water-filling"); other devices then share what is
    left the same way. AC devices lose 15% to the inverter, and a backup can't power an AC
    device without an AC outlet, or any device that draws more than its maximum output.
-4. Generators and car inverters add `fuel_hours` of runtime to every device they can run.
-5. A device with no battery and no usable backup gets status `no_backup` and 0 minutes.
+4. Generators and car inverters add `fuel_hours` of runtime to every device they run.
+5. Everything plugged into one backup runs at once, so together it must fit within the
+   backup's maximum output. Life-sustaining devices are plugged in first, choosing the ones that
+   keep the shortest life-sustaining runtime as long as possible.
+6. A device with no battery and no usable backup gets status `no_backup` and 0 minutes.
 """
 
 import math
 from collections import deque
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
-from itertools import combinations
+from itertools import accumulate, combinations, islice, product
 
 from app.catalog import BACKUP_CATALOG, FUEL_BACKUP_TYPES, device_spec
 from app.schemas import (
@@ -41,6 +47,12 @@ USABLE_BATTERY_FRACTION = 0.9
 """Share of a device battery's charge that is usable before it cuts out."""
 _TOLERANCE = 1e-6
 _SUGGESTED_STATION_ID = "suggested_power_station"
+_MAX_PLUG_CHOICES = 16
+"""How many ways of sharing out overloaded backups the planner compares, at most (rule 5)."""
+_PLUG_SEARCH_WORK = 32_768
+"""Work budget for that comparison (see `_choice_limit`), so big households stay fast."""
+_MAX_FILL_STEPS = 2_000
+"""Search steps allowed when listing the ways to fill one overloaded backup."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,9 +119,37 @@ def running_watts(device: DeviceInput, *, saver_all: bool = False) -> float:
     return device.draw_watts
 
 
-def effective_draw_watts(device: DeviceInput, *, saver_all: bool = False) -> float:
-    """Average draw: running watts x duty cycle (rule 1)."""
+def average_draw_watts(device: DeviceInput, *, saver_all: bool = False) -> float:
+    """Draw averaged over a whole day: running watts x duty cycle."""
     return running_watts(device, saver_all=saver_all) * device.duty_cycle
+
+
+def counted_at_full_draw(device: DeviceInput) -> bool:
+    """True for a life-sustaining device the plan counts at its full draw despite its duty cycle.
+
+    A BiPAP used 8 hours a night averages a third of its draw over a day, but if the outage
+    starts as it is switched on, it drains its battery at full power until the battery is empty.
+    Planning on the average would put the leave-by and call-911 alerts hours after the device
+    has stopped. Only kinds known to run in short bursts spread through the day (suction, a
+    fridge compressor) keep their average; for any other kind, including `custom` devices whose
+    pattern we can't know, the cautious figure is used.
+    """
+    return (
+        device.life_sustaining
+        and device.duty_cycle < 1
+        and not device_spec(device.kind).runs_in_short_bursts
+    )
+
+
+def effective_draw_watts(device: DeviceInput, *, saver_all: bool = False) -> float:
+    """The draw the plan counts on (rule 1): the average draw, or full draw where that applies.
+
+    The plan reports it as each device's `effective_draw_watts`, and the outage engine drains
+    batteries at it between check-ins, so the countdown and those estimates agree.
+    """
+    if counted_at_full_draw(device):
+        return running_watts(device, saver_all=saver_all)
+    return average_draw_watts(device, saver_all=saver_all)
 
 
 def own_battery_wh(device: DeviceInput) -> float:
@@ -135,6 +175,9 @@ def incompatibility(backup: BackupInput, device: DeviceInput, watts: float) -> s
 
 # --- Allocation --------------------------------------------------------------------------
 
+_Plugs = dict[str, frozenset[str]]
+"""Which devices each backup runs: backup id -> ids of the devices plugged into it."""
+
 
 @dataclass(frozen=True, slots=True)
 class _Load:
@@ -142,13 +185,14 @@ class _Load:
 
     device: DeviceInput
     running_watts: float
-    average_watts: float
+    effective_watts: float
+    """The draw the plan counts on (`effective_draw_watts`)."""
     own_minutes: float
     fuel_minutes: float
     wh_per_minute: float
     """Battery-backup energy one minute of runtime costs, including any inverter loss."""
     sources: frozenset[str]
-    """Battery backups that can power this device."""
+    """Battery backups this device is plugged into."""
 
     @property
     def base_minutes(self) -> float:
@@ -166,8 +210,10 @@ class _Outcome:
     """device id -> battery backup id -> Wh taken from that backup."""
     fuel: dict[str, dict[str, float]]
     """device id -> fuel backup id -> minutes it runs the device."""
-    fuel_overflow: dict[str, list[str]]
-    """device id -> fuel backups it fits individually but that were already fully loaded."""
+    fits_alone: _Plugs
+    """Devices each backup could run if nothing else were plugged into it."""
+    plugged: _Plugs
+    """Devices each backup actually runs."""
     totals: dict[str, float]
 
     @property
@@ -182,47 +228,64 @@ class _Outcome:
         bottleneck = self.bottleneck
         return None if bottleneck is None else self.totals[bottleneck]
 
+    @property
+    def feeding_critical(self) -> frozenset[str]:
+        """Battery backups that give energy to at least one life-sustaining device."""
+        return frozenset(
+            backup_id
+            for load in self.loads
+            if load.device.life_sustaining
+            for backup_id in self.flows[load.device.id]
+        )
+
 
 def _allocate(
     devices: Sequence[DeviceInput], backups: Sequence[BackupInput], *, saver_all: bool
 ) -> _Outcome:
-    """Share out all backup power and return every device's runtime."""
-    watts = {d.id: running_watts(d, saver_all=saver_all) for d in devices}
-    batteries = [b for b in backups if not b.is_fuel]
-    usable = {b.id: b.usable_wh for b in batteries}
-    fuel, fuel_overflow = _assign_fuel(devices, [b for b in backups if b.is_fuel], watts)
+    """Decide which backups run which devices, share out the batteries, return every runtime."""
+    usable = {b.id: b.usable_wh for b in backups if not b.is_fuel}
+    unplugged = [_unplugged_load(device, saver_all=saver_all) for device in devices]
+    fits_alone = {
+        backup.id: frozenset(load.device.id for load in unplugged if _can_run(backup, load, usable))
+        for backup in backups
+    }
 
-    loads = []
-    for device in devices:
-        average = effective_draw_watts(device, saver_all=saver_all)
-        efficiency = INVERTER_EFFICIENCY if device.ac_powered else 1.0
-        sources = frozenset(
-            b.id
-            for b in batteries
-            if usable[b.id] > _TOLERANCE and incompatibility(b, device, watts[device.id]) is None
-        )
-        loads.append(
-            _Load(
-                device=device,
-                running_watts=watts[device.id],
-                average_watts=average,
-                own_minutes=own_battery_wh(device) / average * 60,
-                fuel_minutes=sum(fuel[device.id].values()),
-                wh_per_minute=average / 60 / efficiency,
-                sources=sources,
-            )
-        )
+    # Life-sustaining devices are plugged in and levelled first (rules 3 and 5)...
+    critical = [load for load in unplugged if load.device.life_sustaining]
 
-    # Life-sustaining devices are levelled first; everything else shares what they leave.
-    critical = [load for load in loads if load.device.life_sustaining]
-    others = [load for load in loads if not load.device.life_sustaining]
-    levels = _water_fill(critical, usable, committed=[])
+    def critical_score(plugs: _Plugs) -> tuple[float, ...]:
+        return _leximin(_water_fill(_plug_in(critical, backups, plugs), usable, committed=[]))
+
+    room = {backup.id: backup.max_output_watts for backup in backups}
+    critical_plugs = _choose_plugs(
+        critical, backups, fits_alone, room, critical_score, _choice_limit(usable, critical)
+    )
+    plugged_critical = _plug_in(critical, backups, critical_plugs)
+    levels = _water_fill(plugged_critical, usable, committed=[])
     committed = [
         (load.sources, load.wh_per_minute * (levels[load.device.id] - load.base_minutes))
-        for load in critical
+        for load in plugged_critical
     ]
-    levels |= _water_fill(others, usable, committed)
 
+    # ...then everything else shares the output and the energy they leave.
+    others = [load for load in unplugged if not load.device.life_sustaining]
+
+    def others_score(plugs: _Plugs) -> tuple[float, ...]:
+        return _leximin(_water_fill(_plug_in(others, backups, plugs), usable, committed))
+
+    used = {
+        backup_id: sum(load.running_watts for load in critical if load.device.id in ids)
+        for backup_id, ids in critical_plugs.items()
+    }
+    room = {backup.id: backup.max_output_watts - used[backup.id] for backup in backups}
+    other_plugs = _choose_plugs(
+        others, backups, fits_alone, room, others_score, _choice_limit(usable, others)
+    )
+    plugged_others = _plug_in(others, backups, other_plugs)
+    levels |= _water_fill(plugged_others, usable, committed)
+
+    by_id = {load.device.id: load for load in (*plugged_critical, *plugged_others)}
+    loads = tuple(by_id[device.id] for device in devices)
     demands = {
         load.device.id: load.wh_per_minute * (levels[load.device.id] - load.base_minutes)
         for load in loads
@@ -232,43 +295,169 @@ def _allocate(
         load.device.id: load.base_minutes + sum(flows[load.device.id].values()) / load.wh_per_minute
         for load in loads
     }
+    plugged = {backup.id: critical_plugs[backup.id] | other_plugs[backup.id] for backup in backups}
+    fuel = {
+        load.device.id: {
+            backup.id: (backup.fuel_hours or 0.0) * 60
+            for backup in backups
+            if backup.is_fuel and load.device.id in plugged[backup.id]
+        }
+        for load in loads
+    }
     return _Outcome(
-        loads=tuple(loads),
+        loads=loads,
         usable_wh=usable,
         flows=flows,
         fuel=fuel,
-        fuel_overflow=fuel_overflow,
+        fits_alone=fits_alone,
+        plugged=plugged,
         totals=totals,
     )
 
 
-def _assign_fuel(
-    devices: Sequence[DeviceInput],
-    fuel_backups: Sequence[BackupInput],
-    watts: Mapping[str, float],
-) -> tuple[dict[str, dict[str, float]], dict[str, list[str]]]:
-    """Decide which devices each generator / car inverter runs, and for how long (rule 4).
+def _unplugged_load(device: DeviceInput, *, saver_all: bool) -> _Load:
+    """The device running on its own batteries, before any backup is plugged in."""
+    effective = effective_draw_watts(device, saver_all=saver_all)
+    efficiency = INVERTER_EFFICIENCY if device.ac_powered else 1.0
+    return _Load(
+        device=device,
+        running_watts=running_watts(device, saver_all=saver_all),
+        effective_watts=effective,
+        own_minutes=own_battery_wh(device) / effective * 60,
+        fuel_minutes=0.0,
+        wh_per_minute=effective / 60 / efficiency,
+        sources=frozenset(),
+    )
+
+
+def _can_run(backup: BackupInput, load: _Load, usable: Mapping[str, float]) -> bool:
+    """Whether `backup` could run this device if nothing else were plugged into it."""
+    if incompatibility(backup, load.device, load.running_watts) is not None:
+        return False
+    if backup.is_fuel:
+        return (backup.fuel_hours or 0.0) > 0
+    return usable[backup.id] > _TOLERANCE
+
+
+def _plug_in(group: Sequence[_Load], backups: Sequence[BackupInput], plugs: _Plugs) -> list[_Load]:
+    """`group` with each device's fuel time and battery sources set from `plugs` (rule 4).
 
     A generator runs everything plugged into it at the same time for its fuel hours, so it isn't
-    "shared out" like a battery: each device it can run gets the full fuel time. What limits it
-    is its output: devices are plugged in life-sustaining first, then smallest first, until the
-    combined running watts would exceed `max_output_watts`.
+    shared out like a battery: every device on it gets the full fuel time.
     """
-    fuel: dict[str, dict[str, float]] = {d.id: {} for d in devices}
-    overflow: dict[str, list[str]] = {d.id: [] for d in devices}
-    for backup in fuel_backups:
-        if not backup.fuel_hours:
-            continue
-        spare_output = backup.max_output_watts
-        for device in sorted(devices, key=lambda d: (not d.life_sustaining, watts[d.id])):
-            if incompatibility(backup, device, watts[device.id]) is not None:
-                continue
-            if watts[device.id] <= spare_output + _TOLERANCE:
-                fuel[device.id][backup.id] = backup.fuel_hours * 60
-                spare_output -= watts[device.id]
-            else:
-                overflow[device.id].append(backup.label)
-    return fuel, overflow
+    plugged_in = []
+    for load in group:
+        on = [backup for backup in backups if load.device.id in plugs[backup.id]]
+        plugged_in.append(
+            replace(
+                load,
+                fuel_minutes=sum((b.fuel_hours or 0.0) * 60 for b in on if b.is_fuel),
+                sources=frozenset(b.id for b in on if not b.is_fuel),
+            )
+        )
+    return plugged_in
+
+
+def _choose_plugs(
+    group: Sequence[_Load],
+    backups: Sequence[BackupInput],
+    fits_alone: _Plugs,
+    room: Mapping[str, float],
+    score: Callable[[_Plugs], tuple[float, ...]],
+    limit: int,
+) -> _Plugs:
+    """Which devices of `group` each backup runs, with `room` watts of output left on each (rule 5).
+
+    Everything plugged into a backup runs at the same time, so together it must fit within the
+    backup's output. Where every device of the group that could use a backup fits, they all go
+    in. Where they don't, simple rules go wrong: "smallest first" fills a car with devices that
+    have batteries of their own and leaves out the one that has none. So each overloaded backup
+    is filled in the ways that leave out nothing that would still fit, and the combination with
+    the best `score` wins (the first tried wins ties).
+
+    The first combination is a greedy one: each backup in turn takes devices not yet plugged
+    into an earlier backup first, then those with the least battery of their own. At most
+    `limit` combinations are compared, so even a large household is planned at once.
+    """
+    settled: _Plugs = {}
+    open_ids: list[str] = []
+    open_fills: list[list[frozenset[str]]] = []
+    plugged_earlier: set[str] = set()
+    for backup in backups:
+        candidates = sorted(
+            (load for load in group if load.device.id in fits_alone[backup.id]),
+            key=lambda load: (
+                load.device.id in plugged_earlier,
+                load.own_minutes,
+                load.running_watts,
+            ),
+        )
+        if sum(load.running_watts for load in candidates) <= room[backup.id] + _TOLERANCE:
+            fills = [frozenset(load.device.id for load in candidates)]
+            settled[backup.id] = fills[0]
+        else:
+            fills = list(islice(_fills(candidates, room[backup.id]), limit))
+            open_ids.append(backup.id)
+            open_fills.append(fills)
+        plugged_earlier |= fills[0]
+    trials = [
+        settled | dict(zip(open_ids, choice, strict=True))
+        for choice in islice(product(*open_fills), limit)
+    ]
+    return trials[0] if len(trials) == 1 else max(trials, key=score)
+
+
+def _choice_limit(usable: Mapping[str, float], group: Sequence[_Load]) -> int:
+    """How many plug-in choices to compare for `group`, within `_PLUG_SEARCH_WORK`.
+
+    Comparing a choice means water-filling it, which can check every set of charged batteries
+    for every device, once per device it settles: about 2^(charged batteries) x devices^2.
+    A household too big to compare any gets the greedy choice alone.
+    """
+    charged = sum(1 for wh in usable.values() if wh > _TOLERANCE)
+    cost = (1 << charged) * max(1, len(group)) ** 2
+    return max(1, min(_MAX_PLUG_CHOICES, _PLUG_SEARCH_WORK // cost))
+
+
+def _fills(candidates: Sequence[_Load], room: float) -> Iterator[frozenset[str]]:
+    """Ways to plug devices from `candidates` into `room` watts, leaving out none that would fit.
+
+    Depth-first, trying "plug it in" before "leave it out", so the first fill is the greedy one
+    in the candidates' order. Branches that can't end up full are cut, and the search stops
+    after `_MAX_FILL_STEPS` steps (always after the greedy fill has been found).
+    """
+    # rest[i]: watts of candidates i onwards, the most that plugging in the rest could still use.
+    rest = list(accumulate(reversed([load.running_watts for load in candidates]), initial=0.0))
+    rest.reverse()
+    chosen: list[str] = []
+    steps = 0
+
+    def visit(index: int, left: float, smallest_left_out: float) -> Iterator[frozenset[str]]:
+        nonlocal steps
+        steps += 1
+        # Cut if a device already left out would still fit even with everything else plugged in.
+        if steps > _MAX_FILL_STEPS or left - rest[index] >= smallest_left_out - _TOLERANCE:
+            return
+        if index == len(candidates):
+            yield frozenset(chosen)
+            return
+        load = candidates[index]
+        if load.running_watts <= left + _TOLERANCE:
+            chosen.append(load.device.id)
+            yield from visit(index + 1, left - load.running_watts, smallest_left_out)
+            chosen.pop()
+        yield from visit(index + 1, left, min(smallest_left_out, load.running_watts))
+
+    yield from visit(0, room, math.inf)
+
+
+def _leximin(levels: Mapping[str, float]) -> tuple[float, ...]:
+    """Runtimes from shortest to longest (rounded against float noise), for comparing plans.
+
+    Tuples compare item by item, so the larger one is the plan whose shortest runtime is
+    longest, then whose next shortest is longest, and so on ("leximin").
+    """
+    return tuple(sorted(round(level, 6) for level in levels.values()))
 
 
 def _water_fill(
@@ -294,32 +483,52 @@ def _water_fill(
     device may use, Wh). Returns device id -> target runtime in minutes.
     """
     levels = {load.device.id: load.base_minutes for load in group}
-    active = [load for load in group if load.sources]
-    fixed = list(committed)
-    subsets = _subsets(usable)
+    # Sorted by base runtime once, so members come out in the order _level_for_budget walks.
+    active = sorted((load for load in group if load.sources), key=lambda load: load.base_minutes)
+    # Energy each set of batteries holds that isn't promised to a device yet.
+    budgets = {subset: sum(usable[b] for b in subset) for subset in _subsets(usable)}
+    _promise(budgets, committed)
 
     while active:
-        lowest = math.inf
-        tight: list[frozenset[str]] = []
-        for subset in subsets:
-            members = [load for load in active if load.sources <= subset]
-            if not members:
-                continue
-            budget = sum(usable[b] for b in subset) - sum(wh for src, wh in fixed if src <= subset)
-            level = _level_for_budget(members, max(budget, 0.0))
-            if level < lowest - _TOLERANCE:
-                lowest, tight = level, [subset]
-            elif level <= lowest + _TOLERANCE:
-                tight.append(subset)
+        # Sets of batteries with the same members differ only in budget, and the smallest one
+        # binds, so the level is solved once per distinct group of members.
+        binding: dict[tuple[int, ...], float] = {}
+        for subset, budget in budgets.items():
+            members = tuple(i for i, load in enumerate(active) if load.sources <= subset)
+            if members and budget < binding.get(members, math.inf):
+                binding[members] = budget
+        supported = {
+            members: _level_for_budget([active[i] for i in members], max(budget, 0.0))
+            for members, budget in binding.items()
+        }
+        lowest = min(supported.values())
 
         # Devices relying only on an exhausted set of batteries can't rise any further.
-        frozen = [load for load in active if any(load.sources <= subset for subset in tight)]
-        for load in frozen:
+        frozen = {
+            i
+            for members, level in supported.items()
+            if level <= lowest + _TOLERANCE
+            for i in members
+        }
+        promised = []
+        for index in sorted(frozen):
+            load = active[index]
             level = max(load.base_minutes, lowest)
             levels[load.device.id] = level
-            fixed.append((load.sources, load.wh_per_minute * (level - load.base_minutes)))
-        active = [load for load in active if load not in frozen]
+            promised.append((load.sources, load.wh_per_minute * (level - load.base_minutes)))
+        _promise(budgets, promised)
+        active = [load for index, load in enumerate(active) if index not in frozen]
     return levels
+
+
+def _promise(
+    budgets: dict[frozenset[str], float], promised: Iterable[tuple[frozenset[str], float]]
+) -> None:
+    """Take energy promised to devices out of every battery set that holds all their sources."""
+    for sources, wh in promised:
+        for subset in budgets:
+            if sources <= subset:
+                budgets[subset] -= wh
 
 
 def _subsets(usable: Mapping[str, float]) -> list[frozenset[str]]:
@@ -465,7 +674,7 @@ def _device_plan(load: _Load, outcome: _Outcome, backups: Sequence[BackupInput])
     allocations += [
         Allocation(
             backup_id=backup_id,
-            energy_wh=_round(load.average_watts * fuel_minutes / 60),
+            energy_wh=_round(load.effective_watts * fuel_minutes / 60),
             minutes=_round(fuel_minutes),
         )
         for backup_id, fuel_minutes in outcome.fuel[device.id].items()
@@ -474,7 +683,7 @@ def _device_plan(load: _Load, outcome: _Outcome, backups: Sequence[BackupInput])
     status, detail = _status(load, outcome, backups, total)
     return DevicePlan(
         device_id=device.id,
-        effective_draw_watts=_round(load.average_watts),
+        effective_draw_watts=_round(load.effective_watts),
         internal_minutes=_round(load.own_minutes),
         total_minutes=_round(total),
         allocations=allocations,
@@ -487,26 +696,33 @@ def _status(
     load: _Load, outcome: _Outcome, backups: Sequence[BackupInput], total: float
 ) -> tuple[DeviceStatus, str | None]:
     """`no_backup` if nothing can run it, `limited` if some backup power can't reach it."""
+    device_id = load.device.id
     reasons = [
         reason
         for backup in backups
         if (reason := incompatibility(backup, load.device, load.running_watts)) is not None
     ]
-    reasons += [
-        f"{label} is already fully loaded by other devices"
-        for label in outcome.fuel_overflow[load.device.id]
+    left_out = [
+        f"{backup.label} is already fully loaded by other devices"
+        for backup in backups
+        if device_id in outcome.fits_alone[backup.id] - outcome.plugged[backup.id]
     ]
-    # A non-critical device that could use a shared battery but got nothing from it.
+    reasons += left_out
+    # A non-critical device plugged into shared batteries that all went to life-sustaining
+    # devices. (If it got nothing because other non-critical devices would run out sooner, that
+    # is the normal sharing, not something to blame on the life-sustaining devices.)
     starved = (
         not load.device.life_sustaining
-        and outcome.bottleneck is not None
         and bool(load.sources)
-        and not outcome.flows[load.device.id]
+        and not outcome.flows[device_id]
+        and load.sources <= outcome.feeding_critical
     )
     if total <= _TOLERANCE:
         detail = (
             "Life-sustaining devices need all the shared backup power, so none is left for it."
             if starved
+            else "No backup power is left for it once the grid is down."
+            if left_out
             else "Nothing can power it once the grid is down: no charged battery or usable backup."
         )
         return "no_backup", _join_sentences(detail, *reasons)
@@ -520,7 +736,7 @@ def _status(
 def _backup_plan(backup: BackupInput, outcome: _Outcome) -> BackupPlan:
     if backup.is_fuel:
         delivered = sum(
-            load.average_watts * outcome.fuel[load.device.id].get(backup.id, 0.0) / 60
+            load.effective_watts * outcome.fuel[load.device.id].get(backup.id, 0.0) / 60
             for load in outcome.loads
         )
         return BackupPlan(
@@ -559,9 +775,14 @@ def _recommendations(
     def gain_if(
         new_devices: Sequence[DeviceInput], new_backups: Sequence[BackupInput]
     ) -> tuple[_Outcome, float | None]:
+        """Re-plan with a change: the new outcome and the critical runtime it adds.
+
+        The gain is negative if the change would shorten the critical runtime; each caller
+        decides what to do about that rather than having it hidden as 0.
+        """
         trial = _allocate(new_devices, new_backups, saver_all=saver_preview)
         before, after = outcome.critical_runtime, trial.critical_runtime
-        gain = None if before is None or after is None else _round(max(0.0, after - before))
+        gain = None if before is None or after is None else _round(after - before)
         return trial, gain
 
     recs: list[Recommendation] = []
@@ -589,6 +810,9 @@ def _recommendations(
                 backups,
             )
             own_gain = trial.totals[device.id] - outcome.totals[device.id]
+            # Never suggest a change that makes the first life-sustaining device run out sooner.
+            if gain is not None and gain < 0:
+                continue
             if own_gain <= 0.05 and not gain:
                 continue
             spec = device_spec(device.kind)
@@ -656,6 +880,10 @@ def _recommendations(
             [replace(d, charge_percent=100) if d.id in low_devices else d for d in devices],
             [replace(b, charge_percent=100) if b.id in low_backups else b for b in backups],
         )
+        if gain is not None and gain < 0:
+            # More charge can't shorten any runtime. A drop could only come from the capped
+            # search over ways to plug devices in (rule 5), so it says nothing about charging.
+            gain = None
         levels = [
             f"{d.label} is at {low_devices[d.id]:.0f}%" for d in devices if d.id in low_devices
         ]
@@ -771,12 +999,21 @@ def _assumptions(
                 f"{backup.label} counts as one tank of fuel: about "
                 f"{format_duration(backup.fuel_hours * 60)}. Refueling extends this."
             )
-    if any(d.duty_cycle < 1 for d in devices):
+    if any(d.duty_cycle < 1 and not counted_at_full_draw(d) for d in devices):
         notes.append(
-            "Devices that run only part of the day (like a fridge or a CPAP at night) are counted "
-            "at their average draw."
+            "Devices that run only part of the day (like a fridge) are counted at their average "
+            "draw."
         )
-    notes += _overload_warnings(batteries, outcome)
+    for device in devices:
+        if counted_at_full_draw(device):
+            watts = running_watts(device, saver_all=saver_preview)
+            notes.append(
+                f"{device.label} is counted at its full {_watts(watts)} W from the moment the "
+                "power goes out, because it can run for hours at a stretch. Averaged over a day it "
+                f"uses about {_watts(watts * device.duty_cycle)} W, so if it only runs part of "
+                "the day its power may last longer than shown."
+            )
+    notes += _overload_warnings(backups, outcome)
     notes.append(
         "These are estimates from typical figures. Check your device manuals and update the "
         "numbers for the best estimate."
@@ -784,20 +1021,29 @@ def _assumptions(
     return notes
 
 
-def _overload_warnings(batteries: Iterable[BackupInput], outcome: _Outcome) -> list[str]:
-    """Warn when everything sharing one battery would exceed its output if run at once."""
+def _overload_warnings(backups: Iterable[BackupInput], outcome: _Outcome) -> list[str]:
+    """Warn when the devices that could use one backup need more than its output together."""
+    running = {load.device.id: load.running_watts for load in outcome.loads}
+    critical = {load.device.id for load in outcome.loads if load.device.life_sustaining}
     warnings = []
-    for backup in batteries:
-        total = sum(
-            load.running_watts
-            for load in outcome.loads
-            if backup.id in outcome.flows[load.device.id]
-        )
-        if total > backup.max_output_watts + _TOLERANCE:
+    for backup in backups:
+        users = outcome.fits_alone[backup.id]
+        total = sum(running[device_id] for device_id in users)
+        if total <= backup.max_output_watts + _TOLERANCE:
+            continue
+        limit = _watts(backup.max_output_watts)
+        critical_total = sum(running[device_id] for device_id in users & critical)
+        if critical_total > backup.max_output_watts + _TOLERANCE:
+            warnings.append(
+                f"{backup.label} can't run all its devices at once: the life-sustaining ones "
+                f"alone need {_watts(critical_total)} W, over its {limit} W limit. The plan counts "
+                "only the ones it can run together; the rest rely on their own batteries or other "
+                "backups."
+            )
+        else:
             warnings.append(
                 f"{backup.label} can't run all its devices at once ({_watts(total)} W together, "
-                f"limit {_watts(backup.max_output_watts)} W). Plug in life-sustaining devices "
-                "first."
+                f"limit {limit} W). The plan plugs in life-sustaining devices first."
             )
     return warnings
 
@@ -811,8 +1057,9 @@ def _round(value: float) -> float:
 
 
 def _watts(value: float) -> str:
-    """`300` for whole watts, `0.8` otherwise."""
-    return f"{value:.0f}" if float(value).is_integer() else f"{value:.1f}"
+    """`300` for whole watts, `0.8` otherwise (to one decimal place, so 14.000001 is `14`)."""
+    value = float(round(value, 1))
+    return f"{value:.0f}" if value.is_integer() else f"{value:.1f}"
 
 
 def _join_sentences(*parts: str) -> str:
