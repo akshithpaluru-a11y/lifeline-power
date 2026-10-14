@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 from app.ai import DeviceIdentifier
+from app.auth import JoinCodeGuard
 from app.config import Settings
 from app.db import Database
 from app.events import EventBroker
@@ -23,4 +24,5 @@ class AppContext:
     help_sites: HelpSiteFinder
     geocoder: Geocoder
     identifier: DeviceIdentifier
+    join_guard: JoinCodeGuard
     clock: Clock

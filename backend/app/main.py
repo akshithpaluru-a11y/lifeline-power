@@ -8,6 +8,7 @@ import logging
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 import anthropic
 import httpx
@@ -17,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app import __version__
 from app.ai import DeviceIdentifier
 from app.api import api_router
+from app.auth import JoinCodeGuard
 from app.config import Settings, get_settings
 from app.context import AppContext
 from app.db import Database
@@ -90,6 +92,12 @@ def create_app(settings: Settings | None = None, *, clock: Clock = utcnow) -> Fa
                     timeout_seconds=settings.http_timeout_seconds,
                 ),
                 identifier=DeviceIdentifier(claude, settings.anthropic_model),
+                join_guard=JoinCodeGuard(
+                    clock,
+                    per_client=settings.join_attempts_per_client,
+                    overall=settings.join_attempts_overall,
+                    window=timedelta(seconds=settings.join_attempt_window_seconds),
+                ),
                 clock=clock,
             )
             app.state.context = context

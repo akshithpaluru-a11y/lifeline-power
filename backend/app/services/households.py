@@ -2,6 +2,15 @@
 
 Every change is committed first and announced second (`household_updated`), so nobody watching
 the live stream ever sees a change that was then rolled back.
+
+Requests that change the same household at the same moment are kept consistent by SQLite
+itself: only one connection can write at a time, and once it has written it keeps that right
+until it commits. So each change first writes its own rows, then reads the household again in
+the same transaction. That read includes everything other requests committed before, and nobody
+else can commit until this request does. Limits (devices, backups, caregivers) are checked on
+that fresh read, so racing requests can't get past them, and the household announced and
+returned is exactly what ends up in the database, never a copy loaded before someone else's
+change.
 """
 
 import asyncio
@@ -27,6 +36,7 @@ MAX_DEVICES = 20
 MAX_BACKUPS = 8
 """The planner checks every combination of batteries, so keep the count small (2^8 = 256)."""
 MAX_CAREGIVERS = 20
+_UNKNOWN_JOIN_CODE = "No household has this join code. Check it with the family."
 _JOIN_CODE_ATTEMPTS = 20
 LOCATION_LOOKUP_BUDGET_SECONDS = 6.0
 """Longest a request waits for an address lookup. Lookups are a convenience, never required."""
@@ -146,34 +156,45 @@ class HouseholdService:
         await self._session.commit()
         return household, token
 
-    async def update(self, household: models.Household, body: schemas.HouseholdUpdate) -> None:
+    async def update(
+        self, household: models.Household, body: schemas.HouseholdUpdate
+    ) -> schemas.Household:
         """Apply the fields the client sent, keeping the location consistent with the address.
 
-        A new address without coordinates is looked up (and the old coordinates dropped, since
-        they belonged to the old address); new coordinates without a state get their state
-        looked up.
+        A new address without new coordinates is looked up, and the old coordinates are dropped
+        even if the lookup fails, since they belonged to the old address. New coordinates
+        without a new state get their state looked up. Coordinates and state equal to the saved
+        ones count as not sent: a client may send back the whole household it received with
+        only the address edited. Returns the household as saved (and announced).
         """
         changes = body.model_dump(exclude_unset=True)
         for name in ("address", "utility_name"):
             if name in changes:
                 changes[name] = changes[name] or None
+        if "lat" in changes and (changes["lat"], changes["lon"]) == (household.lat, household.lon):
+            del changes["lat"], changes["lon"]
+        if "state" in changes and changes["state"] == household.state:
+            del changes["state"]
         address_changed = "address" in changes and changes["address"] != household.address
-        for name, value in changes.items():
-            setattr(household, name, value)
 
+        # Look up first and change afterwards: a lookup can take seconds, and nothing has been
+        # written (so no other request waits on this one) in the meantime.
         need_state = "state" not in changes
         found_state = None
         if "lat" in changes:
             _, _, found_state = await self._locate(
-                None, household.lat, household.lon, need_state=need_state
+                None, changes["lat"], changes["lon"], need_state=need_state
             )
-        elif address_changed and household.address:
-            household.lat, household.lon, found_state = await self._locate(
-                household.address, None, None, need_state=need_state
+        elif address_changed and changes["address"]:
+            changes["lat"], changes["lon"], found_state = await self._locate(
+                changes["address"], None, None, need_state=need_state
             )
         if found_state and need_state:
-            household.state = found_state
-        await self._save(household)
+            changes["state"] = found_state
+
+        for name, value in changes.items():
+            setattr(household, name, value)
+        return await self._save(household)
 
     async def rotate_join_code(self, household: models.Household) -> str:
         """Give the household a new join code; the old one stops working."""
@@ -190,12 +211,12 @@ class HouseholdService:
     async def add_device(
         self, household: models.Household, body: schemas.DeviceCreate
     ) -> models.Device:
-        """Add a device, filling unspecified fields from the catalog."""
-        if len(household.devices) >= MAX_DEVICES:
-            raise conflict(f"A household can have at most {MAX_DEVICES} devices.")
+        """Add a device, filling unspecified fields from the catalog (409 beyond the limit)."""
         device = equipment.new_device(body, self._clock())
         household.devices.append(device)
-        await self._save(household)
+        await self._write(household)
+        await self._within_limit(len(household.devices), MAX_DEVICES, "devices")
+        await self._commit_and_announce(household)
         return device
 
     async def update_device(
@@ -215,12 +236,15 @@ class HouseholdService:
     async def add_backup(
         self, household: models.Household, body: schemas.BackupCreate
     ) -> models.Backup:
-        """Add a backup power source, filling unspecified fields from the catalog."""
-        if len(household.backups) >= MAX_BACKUPS:
-            raise conflict(f"A household can have at most {MAX_BACKUPS} backup power sources.")
+        """Add a backup power source, filling unspecified fields from the catalog.
+
+        409 beyond the limit, which also keeps the planner's work small (see `MAX_BACKUPS`).
+        """
         backup = equipment.new_backup(body, self._clock())
         household.backups.append(backup)
-        await self._save(household)
+        await self._write(household)
+        await self._within_limit(len(household.backups), MAX_BACKUPS, "backup power sources")
+        await self._commit_and_announce(household)
         return backup
 
     async def update_backup(
@@ -239,16 +263,17 @@ class HouseholdService:
 
     async def join(
         self, body: schemas.JoinRequest
-    ) -> tuple[models.Caregiver, str, models.Household]:
-        """Join a household as a caregiver with its join code. Returns the caregiver token."""
+    ) -> tuple[models.Caregiver, str, schemas.Household]:
+        """Join a household as a caregiver with its join code.
+
+        Returns the caregiver, their token (the only time it is shown) and the household.
+        """
         code = normalize_join_code(body.join_code)
         household = await self._session.scalar(
             select(models.Household).where(models.Household.join_code == code)
         )
         if household is None:
-            raise not_found("No household has this join code. Check it with the family.")
-        if len(household.caregivers) >= MAX_CAREGIVERS:
-            raise conflict(f"A household can have at most {MAX_CAREGIVERS} caregivers.")
+            raise not_found(_UNKNOWN_JOIN_CODE)
         token = new_token("caregiver")
         caregiver = models.Caregiver(
             id=new_id("cg"),
@@ -258,21 +283,70 @@ class HouseholdService:
             joined_at=self._clock(),
         )
         household.caregivers.append(caregiver)
-        await self._save(household)
-        return caregiver, token, household
+        await self._write(household)
+        if household.join_code != code:
+            # The owner replaced the code (for example by removing a caregiver) while this
+            # request was running; the old code must not let anyone in.
+            await self._session.rollback()
+            raise not_found(_UNKNOWN_JOIN_CODE)
+        await self._within_limit(len(household.caregivers), MAX_CAREGIVERS, "caregivers")
+        return caregiver, token, await self._commit_and_announce(household)
 
     async def remove_caregiver(self, household: models.Household, caregiver_id: str) -> None:
-        """Remove a caregiver: their token stops working and their live stream closes."""
-        household.caregivers.remove(_find(household.caregivers, caregiver_id, "Caregiver"))
-        await self._save(household)
-        self._broker.close(household.id, viewer_id=caregiver_id)
+        """Remove a caregiver and revoke their access.
 
-    async def _save(self, household: models.Household) -> None:
-        """Commit, then tell everyone watching the household."""
-        await self._session.commit()
-        self._broker.publish(
-            household.id, "household_updated", HouseholdData(household=household_view(household))
+        Their token stops working and their live streams close. They have seen the join code,
+        so it is replaced too; otherwise they could simply join again. The caregivers who
+        remain see the new code.
+        """
+        household.caregivers.remove(_find(household.caregivers, caregiver_id, "Caregiver"))
+        household.join_code = await self._unused_join_code()
+        await self._write(household)
+        await self._commit_and_announce(household, revoked_viewer=caregiver_id)
+
+    # --- Writing -------------------------------------------------------------------------
+
+    async def _save(self, household: models.Household) -> schemas.Household:
+        """Write, commit and announce a change that has no limit to check."""
+        await self._write(household)
+        return await self._commit_and_announce(household)
+
+    async def _write(self, household: models.Household) -> None:
+        """Write this request's changes, then read the household again in the same transaction.
+
+        Writing takes SQLite's single write lock until the commit (see the module docstring), so
+        the household read here is current, and stays current until this request commits.
+        """
+        await self._session.flush()
+        current = await self._session.scalar(
+            select(models.Household)
+            .where(models.Household.id == household.id)
+            .execution_options(populate_existing=True)
         )
+        if current is None:  # deleted by its owner a moment ago
+            await self._session.rollback()
+            raise not_found("Household not found.")
+
+    async def _within_limit(self, count: int, maximum: int, what: str) -> None:
+        """409, undoing this request's change, if a household now has more than `maximum`."""
+        if count > maximum:
+            await self._session.rollback()
+            raise conflict(f"A household can have at most {maximum} {what}.")
+
+    async def _commit_and_announce(
+        self, household: models.Household, *, revoked_viewer: str | None = None
+    ) -> schemas.Household:
+        """Commit, then tell everyone watching the household. Returns what was announced.
+
+        `revoked_viewer` is a caregiver who was just removed: their streams are closed before
+        the announcement goes out, so they never receive the household as it now is.
+        """
+        view = household_view(household)
+        await self._session.commit()
+        if revoked_viewer is not None:
+            self._broker.close(household.id, viewer_id=revoked_viewer)
+        self._broker.publish(household.id, "household_updated", HouseholdData(household=view))
+        return view
 
     async def _unused_join_code(self) -> str:
         """A join code no other household has (31^6, about 900 million, are possible)."""
