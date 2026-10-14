@@ -6,7 +6,7 @@ import { api } from '../lib/api'
 import { getCaregiver } from '../lib/caregiver'
 import { useNow } from '../lib/useNow'
 import { clock, hms, humanMinutes } from '../lib/format'
-import { planMinutesLeft } from '../lib/time'
+import { criticalLeft } from '../lib/time'
 import { startAlarm, stopAlarm, notify } from '../lib/alarm'
 import type { Household, Outage, Plan, StreamEvent } from '../lib/types'
 import { Logo } from '../components/Logo'
@@ -129,7 +129,7 @@ function OutageView({ outage, h, now, missed }: { outage: Outage; h: Household; 
   const first = h.patient_first_name
   const crit = outage.plan.critical_runtime_minutes ?? 0
   const bottleneck = h.devices.find((d) => d.id === outage.plan.bottleneck_device_id)
-  const left = planMinutesLeft(outage, crit, now)
+  const left = criticalLeft(outage, now)
   const t = hms(left * 60_000)
   const elapsed = hms((now - new Date(outage.started_at).getTime()) * outage.speed)
   const drill = outage.drill ?? outage.source === 'drill'
@@ -164,7 +164,7 @@ function OutageView({ outage, h, now, missed }: { outage: Outage; h: Household; 
             {t.h}<span className="text-fg-3">:</span>{String(t.m).padStart(2, '0')}<span className="text-[26px] text-fg-3">:{String(t.s).padStart(2, '0')}</span>
           </div>
           <p className="mt-2 text-[13px] text-fg-3">of life support left</p>
-          <Segments value={crit ? left / crit : 0} count={32} tone={left < 60 ? 'alert' : 'amber'} className="mt-4 h-2" />
+          <Segments value={crit ? Math.min(1, left / crit) : 0} count={32} tone={left < 60 ? 'alert' : 'amber'} className="mt-4 h-2" />
           {next && (
             <p className="mt-4 flex items-start gap-2 border-t border-white/[0.06] pt-4 text-[13px] leading-snug text-fg-2">
               <Clock size={14} className="mt-0.5 shrink-0 text-amber" />

@@ -97,7 +97,7 @@ export function computeMilestones(plan: Plan, startedAt: number, speed: number, 
     { key: 'conserve', at: at(0), title: 'Save battery', detail: 'Switch devices to low-power settings and unplug anything you don’t need.', severity: 'info', passed: true },
   ]
   if (crit > 0) {
-    m.push({ key: 'check_in', at: at(Math.min(60, crit / 2)), title: 'Check in', detail: 'Tap “We’re OK” so your family knows.', severity: 'info', passed: false })
+    m.push({ key: 'check_in', at: at(Math.min(60, crit / 2)), title: 'Check in', detail: 'Tap “I’m OK” so your family knows.', severity: 'info', passed: false })
     m.push({ key: 'halfway', at: at(crit / 2), title: 'Halfway', detail: 'Half the critical battery is gone.', severity: 'warning', passed: false })
     const leave = Math.max(0, crit - travelMinutes - 30)
     m.push({ key: 'leave_by', at: at(leave), title: 'Leave for a powered location', detail: `Head to ${siteName} (${travelMinutes} min away) before batteries get low.`, severity: 'warning', passed: false })

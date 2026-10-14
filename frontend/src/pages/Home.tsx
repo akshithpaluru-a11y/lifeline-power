@@ -155,7 +155,7 @@ export default function Home() {
                     <span className="grid size-8 shrink-0 place-items-center rounded-xl bg-white/[0.05] text-fg-2"><I size={15} /></span>
                     <span className="min-w-0 flex-1">
                       <span className="block text-[13.5px] leading-snug">{r.title}</span>
-                      <span className="block text-[12px] leading-snug text-fg-3">{r.detail}</span>
+                      <span className="line-clamp-2 block text-[12px] leading-snug text-fg-3">{r.detail}</span>
                     </span>
                     {r.gain_minutes ? <Pill tone="live" className="shrink-0">+{humanMinutes(r.gain_minutes)}</Pill> : <ChevronRight size={16} className="shrink-0 text-fg-4" />}
                   </button>

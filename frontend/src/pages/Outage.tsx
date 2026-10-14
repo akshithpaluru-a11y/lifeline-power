@@ -7,7 +7,7 @@ import { api } from '../lib/api'
 import { stopAlarm } from '../lib/alarm'
 import { useNow } from '../lib/useNow'
 import { clock, hms, humanMinutes } from '../lib/format'
-import { deadline, planMinutesLeft } from '../lib/time'
+import { criticalLeft, deadline, planMinutesLeft } from '../lib/time'
 import { Ring } from '../components/Ring'
 import { Pill } from '../components/Pill'
 import { Segments } from '../components/Segments'
@@ -47,8 +47,8 @@ export default function Outage() {
   const drill = outage.drill ?? outage.source === 'drill'
   const crit = outage.plan.critical_runtime_minutes ?? Math.max(0, ...rows.map((r) => r.p.total_minutes))
   const primary = rows.find((r) => r.d.id === outage.plan.bottleneck_device_id) ?? rows.find((r) => r.p.total_minutes > 0) ?? rows[0]
-  const left = planMinutesLeft(outage, crit, now)
-  const frac = crit > 0 ? left / crit : 0
+  const left = criticalLeft(outage, now)
+  const frac = crit > 0 ? Math.min(1, left / crit) : 0
   const t = hms(left * 60_000)
   const elapsed = hms((now - new Date(outage.started_at).getTime()) * outage.speed)
   const urgent = left < 60
@@ -93,7 +93,7 @@ export default function Outage() {
           <motion.div key="missed" initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
             className="relative mt-3 flex items-center gap-3 rounded-2xl bg-alert/10 p-3 ring-1 ring-inset ring-alert/25">
             <TriangleAlert size={18} className="shrink-0 text-alert" />
-            <span className="text-[13.5px]">Check-in is {Math.round(missed)} min late. Your family has been told. Tap <span className="text-fg">We’re OK</span>.</span>
+            <span className="text-[13.5px]">Check-in is {Math.round(missed)} min late. Your family has been told. Tap <span className="text-fg">I’m OK</span>.</span>
           </motion.div>
         )}
       </AnimatePresence>
@@ -109,7 +109,7 @@ export default function Outage() {
               <span className="text-[30px] text-fg-3">:{String(t.s).padStart(2, '0')}</span>
             </span>
             <span className="mt-3 text-[13px] text-fg-3">
-              {drill ? <>of life support left</> : <>Battery empty around <span className="text-fg">{clock(new Date(deadline(outage, crit)))}</span></>}
+              {drill ? <>of life support left</> : <>Battery empty around <span className="text-fg">{clock(new Date(outage.milestones.find((m) => m.key === 'depleted')?.at ?? deadline(outage, crit)))}</span></>}
             </span>
           </Ring>
         </motion.div>
@@ -202,7 +202,7 @@ export default function Outage() {
         <div className="mx-auto max-w-[440px] bg-gradient-to-t from-ink-950 via-ink-950/95 to-transparent px-4 pb-[max(.75rem,env(safe-area-inset-bottom))] pt-6">
           {outage.last_check_in_at && <p className="mb-2 text-center text-[12px] text-fg-3">Last check-in {clock(outage.last_check_in_at)}</p>}
           <div className="grid grid-cols-[1fr_auto] gap-2.5">
-            <Button variant="light" size="lg" icon={<ThumbsUp size={18} />} onClick={async () => { silence(); await checkIn() }}>We’re OK</Button>
+            <Button variant="light" size="lg" icon={<ThumbsUp size={18} />} onClick={async () => { silence(); await checkIn() }}>I’m OK</Button>
             <a href="tel:911" className="flex h-14 items-center gap-2 rounded-[18px] bg-gradient-to-b from-[#ff6f64] to-alert px-5 text-[16px] font-medium text-white shadow-[inset_0_1px_0_rgb(255_255_255/.35),0_8px_24px_-8px_rgb(255_90_78/.7)]">
               <Phone size={18} /> 911
             </a>
