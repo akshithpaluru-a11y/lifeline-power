@@ -78,6 +78,9 @@ Environment variables (or a `.env` file in the working directory):
 | `LIFELINE_NOMINATIM_URL` | `https://nominatim.openstreetmap.org` | OpenStreetMap geocoder |
 | `LIFELINE_CENSUS_GEOCODER_URL` | `https://geocoding.geo.census.gov/geocoder` | US Census geocoder |
 | `LIFELINE_HTTP_TIMEOUT_SECONDS` | `8` | Timeout for each map-service request |
+| `LIFELINE_JOIN_ATTEMPTS_PER_CLIENT` | `10` | Wrong join codes allowed per client (IP or IPv6 /64) per window |
+| `LIFELINE_JOIN_ATTEMPTS_OVERALL` | `200` | Wrong join codes allowed from everyone together per window |
+| `LIFELINE_JOIN_ATTEMPT_WINDOW_SECONDS` | `900` | Join-code rate-limit window |
 | `LIFELINE_USER_AGENT` | `LifeLinePower/1.0 (...)` | Sent to map services, as their usage policies ask |
 
 ## Architecture
@@ -133,14 +136,20 @@ Some decisions worth knowing:
 The planner answers: *if the power went out now, how long would each device keep running, and
 what would help most?* The rules, which the app also shows to families:
 
-1. **Average draw.** A device draws its normal watts (or its saver watts, if saver mode is on and
-   lower), times its duty cycle. A CPAP that runs about a third of the day at 40 W averages 14 W.
+1. **Average draw, except where averaging is unsafe.** A device draws its normal watts (or its
+   saver watts, if saver mode is on and lower), times its duty cycle. A fridge that runs a third
+   of the time at 60 W averages 20 W. But a life-sustaining device that runs in long sessions (a
+   BiPAP someone depends on, a dialysis cycler) may have to run continuously once the power is
+   out, so it is counted at its full running watts. Only kinds that really run in short bursts
+   (suction, nebulizer, power wheelchair, medication fridge) are averaged.
 2. **Its own batteries first.** Internal battery x charge %, plus spare batteries (assumed full),
    and only 90% of that counts as usable, because batteries cut off before they are empty.
 3. **Shared batteries are shared fairly.** Power stations and UPS units are split to make the
    *shortest* runtime among life-sustaining devices as long as possible. AC devices lose 15% to
-   the inverter. A backup can't run an AC device without an AC outlet, or a device that draws
-   more than its maximum output. Non-life-sustaining devices share whatever is left.
+   the inverter. A backup can't run an AC device without an AC outlet, and the devices it runs
+   together must fit within its maximum output, so life-sustaining devices are plugged in first
+   (choosing the set that keeps the shortest life-sustaining runtime longest).
+   Non-life-sustaining devices share whatever is left.
 4. **Fuel.** Generators and car inverters add one tank's run time (`fuel_hours`) to every device
    they can run at once, life-sustaining devices first, up to their output limit. They always
    come with a carbon-monoxide warning.
@@ -173,11 +182,15 @@ list when the utility is known), inviting a caregiver, and adding a location.
 ### Outages
 
 When an outage starts, the plan becomes a timeline: `halfway`, `leave_by` (runtime minus the drive
-to the nearest place likely to have power minus a 30-minute buffer), `critical_low` (30 minutes
-left) and `depleted`, plus an hourly `check_in`. A check-in estimates where every battery is now
+to the nearest hospital, fire or police station minus a 30-minute buffer), `critical_low` (30
+minutes left) and `depleted`, plus an hourly `check_in`. If the battery can't even last the drive,
+`leave_by` becomes a critical "call 911 now". A check-in estimates where every battery is now
 (fuel first, then each device's own batteries, then its share of the shared batteries), applies
 any levels the owner reported, and re-plans, so a check-in without new readings leaves the
-countdown where it was. Drills run the same timeline `speed` times faster.
+countdown where it was. A device reported fuller than estimated was really running off a shared
+battery (say, a ventilator plugged into a power station keeps its own battery topped up), so that
+energy is taken from the shared battery instead of vanishing. Drills run the same timeline
+`speed` times faster.
 
 ## Data sources
 

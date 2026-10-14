@@ -49,7 +49,7 @@ Send as `Authorization: Bearer <token>`. For the SSE stream (EventSource can't s
   "life_sustaining_default": true,
   "typical_draw_watts": 300,
   "saver_draw_watts": 180,            // null if no lower-power mode
-  "saver_tip": "Ask your care team ahead of time if a lower flow setting is safe for you.",  // null when the device has no saver mode
+  "saver_tip": "Ask your care team ahead of time if a lower flow setting is safe for you.",  // may be null; can be present even when saver_draw_watts is null
   "internal_battery_wh": 0,           // 0 = no internal battery
   "duty_cycle": 1.0,                  // fraction of time the device is actually drawing power
   "ac_powered": true,                 // needs an AC outlet (backup must have an AC inverter)
@@ -162,14 +162,20 @@ editable per device): `oxygen_concentrator_home`, `oxygen_concentrator_portable`
 }
 ```
 Planner rules the backend implements (documented so the UI can explain them):
-1. Effective draw = (saver draw if `saver_enabled` and available, else draw) x duty cycle.
+1. Effective draw = (saver draw if `saver_enabled` and available, else draw) x duty cycle. Exception:
+   a life-sustaining device that runs in long sessions (anything except short-burst kinds such as
+   suction, nebulizer, power wheelchair and medication fridge) is counted at its **full** running
+   draw, because once the power goes out it may need to run continuously. The plan's
+   `assumptions` say so for each such device.
 2. Each device first uses its own internal + spare batteries (x charge %, 90% usable).
 3. Shared backups (power stations, UPS) are split to **maximize the shortest runtime among
    life-sustaining devices** (water-filling), then non-critical devices get what is left. AC devices
-   lose 15% to the inverter; a backup can't power an AC device if `has_ac_outlet` is false, or any
-   device whose draw exceeds `max_output_watts`.
-4. Generators and car inverters count as `fuel_hours` of power for any device they can run
-   (refueling extends this). They always add a carbon-monoxide safety recommendation.
+   lose 15% to the inverter; a backup can't power an AC device if `has_ac_outlet` is false, and
+   the devices it runs **together** must fit within `max_output_watts` (life-sustaining devices are
+   plugged in first). A device left off a fully loaded backup is `limited` or `no_backup` with a
+   `status_detail` saying so.
+4. Generators and car inverters count as `fuel_hours` of power for the devices they can run
+   together within their output limit (refueling extends this). They always add a carbon-monoxide safety recommendation.
 5. A device with no battery and no usable backup gets `status: "no_backup"` and `total_minutes: 0`.
 
 ### Outage
@@ -209,6 +215,12 @@ time to nearest help site minus 30 min buffer, warning; travel defaults to 30 mi
 `critical_low` (30 min of critical runtime left, critical: "Call 911 if you can't reach power"),
 `depleted` (critical runtime reached, critical). `drill` outages produce the same milestones but
 caregiver events are marked `drill: true`.
+
+Not every key is always present: `halfway` is left out when it would come at or after `leave_by`
+(short runtimes, or nothing powering a life-sustaining device). When the battery can't last the
+drive to the help site, `leave_by` is `critical` with the title "Not enough battery to reach power"
+and tells the family to call 911 now. `leave_by` only targets hospitals and fire or police
+stations.
 
 ### HelpSite
 ```json
