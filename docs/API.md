@@ -49,7 +49,7 @@ Send as `Authorization: Bearer <token>`. For the SSE stream (EventSource can't s
   "life_sustaining_default": true,
   "typical_draw_watts": 300,
   "saver_draw_watts": 180,            // null if no lower-power mode
-  "saver_tip": "Ask your care team ahead of time if a lower flow setting is safe for you.",
+  "saver_tip": "Ask your care team ahead of time if a lower flow setting is safe for you.",  // null when the device has no saver mode
   "internal_battery_wh": 0,           // 0 = no internal battery
   "duty_cycle": 1.0,                  // fraction of time the device is actually drawing power
   "ac_powered": true,                 // needs an AC outlet (backup must have an AC inverter)
@@ -220,7 +220,7 @@ caregiver events are marked `drill: true`.
   "distance_km": 3.4,
   "travel_minutes": 12,                     // rough driving estimate
   "likely_has_power": true,                 // hospitals/fire stations have backup generators
-  "address": "987400 Nebraska Medical Center, Omaha, NE"
+  "address": "987400 Nebraska Medical Center, Omaha, NE"   // null when OpenStreetMap has no address
 }
 ```
 
