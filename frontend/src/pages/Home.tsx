@@ -36,6 +36,7 @@ export default function Home() {
       : { icon: Unplug, text: `On battery · ${Math.round((power.level ?? 0) * 100)}%`, tone: 'amber' as const }
     : { icon: Plug, text: power.support === 'pending' ? 'Checking charger…' : 'Charger not visible', tone: 'muted' as const }
 
+  const manual = async () => { primeAudio(); await raiseOutage('manual'); nav('/app/outage') }
   const drill = async () => { primeAudio(); await raiseOutage('drill', DRILL_SPEED); nav('/app/outage') }
 
   const act = (r: Recommendation) => {
@@ -65,10 +66,14 @@ export default function Home() {
         <p className="mt-3 text-[13.5px] leading-relaxed text-fg-2">
           Keep this phone plugged in near {h.patient_first_name}. If the outlet goes dead, LifeLine sounds an alarm, starts the countdown and alerts {h.caregivers.length || 'your'} {h.caregivers.length === 1 ? 'caregiver' : 'caregivers'}.
         </p>
+        <p className="mt-2 text-[12px] leading-relaxed text-fg-4">Keep cellular data on. The Wi-Fi router goes down with the power.</p>
         {power.support === 'unsupported' && (
-          <p className="mt-3 rounded-xl bg-white/[0.04] p-3 text-[12.5px] leading-relaxed text-fg-3">
-            This browser can’t see the charger. Open LifeLine in Chrome on Android or a laptop to catch outages automatically. Drills and manual outage mode still work.
-          </p>
+          <div className="mt-3 rounded-xl bg-white/[0.04] p-3">
+            <p className="text-[12.5px] leading-relaxed text-fg-3">This browser can’t see the charger. Open LifeLine in Chrome on Android or a laptop to catch outages automatically, or tap below when the power goes out.</p>
+            <button onClick={manual} className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl bg-alert/15 py-2.5 text-[13.5px] font-medium text-alert ring-1 ring-inset ring-alert/25">
+              <Unplug size={15} /> The power’s out
+            </button>
+          </div>
         )}
       </motion.section>
 
