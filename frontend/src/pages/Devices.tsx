@@ -64,6 +64,9 @@ export default function Devices() {
       <div className="mt-3 space-y-2.5">
         {h.backups.map((b) => {
           const p = plan?.backups.find((x) => x.backup_id === b.id)
+          // Only devices this backup actually gives energy to; plugging in the rest would drain it.
+          const plugs = (p?.device_ids ?? []).filter((id) => plan?.devices.find((x) => x.device_id === id)?.allocations.some((a) => a.backup_id === b.id && a.energy_wh > 0))
+            .map((id) => h.devices.find((x) => x.id === id)?.label).filter(Boolean)
           return (
             <button key={b.id} onClick={() => setBk(b)} className="surface flex w-full items-center gap-4 rounded-[24px] p-4 text-left hover:bg-white/[0.02]">
               <span className="grid size-12 shrink-0 place-items-center rounded-2xl bg-sky/10 text-sky ring-1 ring-inset ring-sky/20"><BackupIcon type={b.type} size={20} /></span>
@@ -73,6 +76,11 @@ export default function Devices() {
                   {b.capacity_wh ? `${b.capacity_wh} Wh · ${b.charge_percent ?? 100}% · ${b.max_output_watts} W max` : `${b.fuel_hours ?? 0} h of fuel · ${b.max_output_watts} W max`}
                 </span>
                 {p && p.usable_wh > 0 && <Segments value={p.allocated_wh / p.usable_wh} count={24} tone="muted" className="mt-2.5 h-1" />}
+                {plugs.length > 0 && (
+                  <span className="mt-2 block text-[12px] leading-snug text-fg-3">
+                    Plug in: <span className="text-fg-2">{plugs.join(', ')}</span>
+                  </span>
+                )}
               </span>
             </button>
           )
@@ -120,6 +128,7 @@ export function DeviceForm({ value, onDone, onSubmit }: { value: DraftDevice; on
     try { applyMatch(await api.identifyDevice(scan)) } catch { setScanNote('Couldn’t look that up. Pick the type below.') } finally { setBusy(false) }
   }
   const photo = async (f: File) => {
+    if (f.size > 3.5 * 1024 * 1024) return setScanNote('That photo is too big. Use one under 3.5 MB, or type the model name.')
     setBusy(true)
     try { applyMatch(await api.identifyPhoto(f)) } catch (e) { setScanNote(e instanceof ApiError && e.status === 400 ? e.message : 'Couldn’t read that photo. Type the model name instead.') } finally { setBusy(false) }
   }

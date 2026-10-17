@@ -109,7 +109,7 @@ export interface Plan {
   critical_runtime_minutes: number | null
   bottleneck_device_id: string | null
   devices: PlanDevice[]
-  backups: { backup_id: string; usable_wh: number; allocated_wh: number; unused_wh: number; fuel_minutes?: number | null }[]
+  backups: { backup_id: string; usable_wh: number; allocated_wh: number; unused_wh: number; fuel_minutes?: number | null; device_ids?: string[] }[]
   recommendations: Recommendation[]
   assumptions: string[]
 }

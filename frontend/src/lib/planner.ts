@@ -82,7 +82,8 @@ export function computePlan(h: Household, saver = false): Plan {
     critical_runtime_minutes: bottleneck ? bottleneck.total : null,
     bottleneck_device_id: bottleneck?.d.id ?? null,
     devices,
-    backups: pools.map((p) => ({ backup_id: p.b.id, usable_wh: p.usable, allocated_wh: p.usable - p.left, unused_wh: p.left })),
+    backups: pools.map((p) => ({ backup_id: p.b.id, usable_wh: p.usable, allocated_wh: p.usable - p.left, unused_wh: p.left,
+      device_ids: rows.filter((r) => r.allocations.some((a) => a.backup_id === p.b.id)).map((r) => r.d.id) })),
     recommendations: recs.sort((a, b) => (b.gain_minutes ?? -1) - (a.gain_minutes ?? -1)),
     assumptions: ['Batteries deliver about 90% of their rating.', 'AC devices on a power station lose about 15% to the inverter.'],
   }
