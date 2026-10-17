@@ -8,13 +8,14 @@ the contract was renamed, removed or retyped.
 | Where | Field | Meaning |
 |---|---|---|
 | `Plan.devices[]` | `status_detail` (string or null) | Plain-English reason for `limited` / `no_backup`, e.g. "Jackery has no AC outlet". Null when `ok`. |
+| `Plan.backups[]` | `device_ids` (string[]) | The devices the plan has plugged into this backup; everything listed runs at once. Show it as "Plug these into ...". During an outage, check-ins keep this arrangement (see Outages). |
 | `Plan.backups[]` | `fuel_minutes` (number or null) | Generators and car inverters: run time on one tank. Null for batteries. For these backups `usable_wh` and `allocated_wh` are the energy delivered to the devices they run over that time, and `unused_wh` is 0. |
 | `Recommendation.kind` | `"safety"` | One more kind: the carbon-monoxide warning (`id: "co_safety"`, `gain_minutes: null`) shown whenever there is a generator or car inverter. Safety items always come first. |
 | `Outage` | `last_check_in_ok` (bool) | False when the owner's latest check-in sent `ok: false` ("I need help"). |
 | `GET /api/health` | `ai_enabled` (bool) | Whether Claude is configured (photo identification needs it). |
 | `GET /api/catalog/backups` items | `has_ac_outlet`, `typical_fuel_hours` | Defaults a new backup of that type gets. |
 | Error responses | code `internal` | Used only for unexpected 500 errors. |
-| `POST /api/caregivers/join` | `429`, code `unavailable` | Too many wrong join codes: 10 per 15 minutes from one client (an IP, or an IPv6 /64), or 200 per 15 minutes overall. Successful joins don't count. While over the limit even the right code gets 429. Tunable with `LIFELINE_JOIN_ATTEMPTS_PER_CLIENT`, `LIFELINE_JOIN_ATTEMPTS_OVERALL`, `LIFELINE_JOIN_ATTEMPT_WINDOW_SECONDS`. Behind a reverse proxy, run uvicorn with `--proxy-headers --forwarded-allow-ips` so it sees real client IPs. |
+| `POST /api/caregivers/join` | `429`, code `unavailable` | Too many wrong join codes: 10 per 15 minutes from one client (an IP, or an IPv6 /56), or 200 per 15 minutes overall. Successful joins don't count. While a client is over its limit even the right code gets 429. Once the overall limit is reached, only clients that already sent a wrong code are refused; anyone else still gets a try. Tunable with `LIFELINE_JOIN_ATTEMPTS_PER_CLIENT`, `LIFELINE_JOIN_ATTEMPTS_OVERALL`, `LIFELINE_JOIN_ATTEMPT_WINDOW_SECONDS`. Behind a reverse proxy, run uvicorn with `--proxy-headers --forwarded-allow-ips` so it sees real client IPs. |
 
 Timestamps carry milliseconds: `2026-10-20T18:04:11.250Z` (still ISO 8601 UTC with `Z`).
 
@@ -95,9 +96,24 @@ Timestamps carry milliseconds: `2026-10-20T18:04:11.250Z` (still ISO 8601 UTC wi
   reported levels replace the estimates. A device reading **higher** than the estimate means the
   device was running from something else (usually a power station or UPS it is plugged into), so
   that energy, inverter loss included, is taken from the shared batteries it could use unless the
-  owner reported those batteries too. Readings never raise a shared battery's estimate. Device settings changed during the outage (for example
-  saver mode switched on) are used from then on. Check-in levels belong to the outage; they don't
-  change the household's saved devices.
+  owner reported those batteries too. For a device used only part of the time (a wheelchair,
+  a fridge), whose estimate is a daily average, only the charge it *gained* is taken from shared
+  batteries: a full reading may just mean it sat unused. Readings never raise a shared battery's
+  estimate. Device settings changed during the outage (for example saver mode switched on) are
+  used from then on. Check-in levels belong to the outage; they don't change the household's
+  saved devices.
+- A check-in keeps the plug arrangement the family was shown (`Plan.backups[].device_ids`): a
+  backup keeps every device it ran as long as it can still run them all. Only devices with no
+  working backup left (new ones, or ones whose battery ran dry) are placed again. So a check-in
+  with no new readings never moves the countdown later.
+- The alerts that say a life-sustaining device has no power (`power_lost`, critical `leave_by`)
+  name the backup for that kind of device: a manual resuscitation bag (ventilator), oxygen
+  cylinders (oxygen), gravity or syringe feeding (feeding pump), a manual suction device, the
+  dialysis center's emergency plan, otherwise "your care team's emergency backup plan".
+- `conserve` lists saver steps as actions after one caveat: "Only if your care team has already
+  approved it: switch Mom's O2 to a lower flow setting; turn off the humidifier on Dad's BiPAP."
+- A `halfway` alert that was already announced stays exactly as announced (time and text) when a
+  check-in rebuilds the timeline.
 - `ok: false` is stored as `last_check_in_ok: false` and included in the `check_in` event; the
   plan is still recomputed.
 - `missed_check_in` repeats every further 15 minutes until the owner checks in. After a gap in the
@@ -136,16 +152,20 @@ Timestamps carry milliseconds: `2026-10-20T18:04:11.250Z` (still ISO 8601 UTC wi
 **AI device helper**
 - A photo needs `ANTHROPIC_API_KEY`. Without one (or if Claude can't answer) a photo-only request
   is a 503 `unavailable`; with `text` as well, the text is matched against the catalog instead.
-  Photos must be JPEG, PNG, GIF or WebP under 5 MB (400 otherwise). `text` is at most 500
+  Photos must be JPEG, PNG, GIF or WebP under 3.5 MB (400 otherwise; Claude's limit is 5 MB once
+  base64-encoded). `text` is at most 500
   characters in JSON and multipart alike; JSON bodies over 16 KB are a 400.
 - Figures Claude returns are checked against plausible ranges for that device kind: a draw that is
   too low becomes the catalog's typical draw, a draw that is too high is capped at the kind's
   maximum, a battery that is too large becomes the typical battery. Any correction lowers
   `confidence` to `low` and the explanation says to check the label.
 - A typed name, or Claude's reading of a label, that matches a model with checked figures (e.g.
-  Trilogy 100, Inogen One G5, Inogen At Home, EverFlo, Astral, AirSense 10, SimplyGo) is answered
-  from that list. Typed names don't call Claude at all (`source: "catalog"`). Portable
-  concentrator figures assume the highest setting, so runtimes err short.
+  Trilogy 100, Inogen One G5, Inogen Rove 6, Inogen At Home, EverFlo, Astral, AirSense 10,
+  SimplyGo) is answered from that list with `confidence: "high"`. Typed names don't call Claude at
+  all (`source: "catalog"`). Portable concentrator figures assume the highest setting, so runtimes
+  err short. Models we recognise but have no figures of their own for (Inogen One G4, SimplyGo
+  Mini, Trilogy Evo, ...) get the kind's typical figures with `confidence: "medium"` and an
+  explanation quoting the maker's rated runtime and asking for the battery's watt-hours.
 - A photo's type is read from its bytes, not the declared content type. Bytes that aren't JPEG,
-  PNG, GIF or WebP are a 400, and a photo Claude can't read is a 400 ("We couldn't read that
-  photo"), not a 503.
+  PNG, GIF or WebP are a 400, and a photo Claude says it can't use is a 400 ("We couldn't read
+  that photo"), not a 503. Other errors from Claude count as "unavailable" (503 for a photo alone).

@@ -26,7 +26,8 @@ from app.schemas import Confidence, DeviceMatch, IdentifyDeviceResponse
 logger = logging.getLogger(__name__)
 
 ImageMediaType = Literal["image/jpeg", "image/png", "image/gif", "image/webp"]
-MAX_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_IMAGE_BYTES = 3_500_000
+"""Claude takes images up to 5 MB once base64-encoded (4/3 larger), so about 3.75 MB raw."""
 
 
 def sniff_image_type(data: bytes) -> ImageMediaType | None:
@@ -81,8 +82,29 @@ KNOWN_MODELS: tuple[KnownModel, ...] = (
         "(about 92 Wh) 1 to 5.5 hours depending on the setting. On a lower setting it lasts "
         "longer; ask your supplier for your setting's figure.",
     ),
-    KnownModel(("inogen one g4", "inogen g4"), "oxygen_concentrator_portable", "Inogen One G4"),
-    KnownModel(("inogen rove 6", "rove 6"), "oxygen_concentrator_portable", "Inogen Rove 6"),
+    # Inogen G4 spec sheet: single battery (BA-400) "up to 2.7 hours" and double "up to 5
+    # hours" on setting 1, less on settings 2 and 3. Inogen doesn't publish the watt-hours.
+    KnownModel(
+        ("inogen one g4", "inogen g4"),
+        "oxygen_concentrator_portable",
+        "Inogen One G4",
+        note="Inogen rates its single battery at up to 2.7 hours on setting 1 and less on "
+        "settings 2 and 3, but doesn't publish its watt-hours. These are typical figures for a "
+        "portable concentrator: enter the watt-hours (Wh) printed on your battery.",
+    ),
+    # The Rove 6 takes the G5's 8-cell pack (BA-500, 14.4 V, 92 Wh; replacement listings fit
+    # both). Inogen: "up to 6 hours, 15 minutes on Flow Setting 1" with it. Like the G5 it has
+    # six settings, so we use the G5's highest-setting draw.
+    KnownModel(
+        ("inogen rove 6", "inogen one rove 6", "rove 6"),
+        "oxygen_concentrator_portable",
+        "Inogen Rove 6",
+        83,
+        92,
+        "It uses the same 8-cell battery as the Inogen One G5 (about 92 Wh), which Inogen rates "
+        "at up to 6 hours 15 minutes on setting 1. These figures assume the highest setting "
+        "(6), about 1 hour; ask your supplier for your setting's figure.",
+    ),
     # Inogen's energy savings calculator: 100 W at 2 L/min and 275 W at the highest flow
     # setting, 5 L/min.
     KnownModel(
@@ -102,7 +124,21 @@ KNOWN_MODELS: tuple[KnownModel, ...] = (
         0,
         "Philips lists an average power consumption of 350 W and no battery.",
     ),
-    KnownModel(("simplygo mini",), "oxygen_concentrator_portable", "Philips SimplyGo Mini"),
+    # Philips SimplyGo Mini battery sheet: standard battery "up to 4.5 hours" on pulse setting 2
+    # at 20 breaths/min (extended: about 9 hours). Philips doesn't publish its watt-hours.
+    KnownModel(
+        (
+            "simplygo mini",
+            "simply go mini",
+            "philips simplygo mini",
+            "respironics simplygo mini",
+        ),
+        "oxygen_concentrator_portable",
+        "Philips SimplyGo Mini",
+        note="Philips rates its standard battery at up to 4.5 hours on pulse setting 2 (the "
+        "extended battery about 9 hours), but doesn't publish its watt-hours. These are typical "
+        "figures for a portable concentrator: enter the watt-hours (Wh) printed on your battery.",
+    ),
     # Philips SimplyGo spec sheet: 14.4 V, 6.6 Ah battery (about 95 Wh) lasting 0.7 h on
     # 2 L/min continuous flow (3.5 h on pulse setting 2); 120 W on AC when not charging.
     # 125 W keeps one battery under 0.7 h (95 x 0.9 / 125 = 0.68).
@@ -294,7 +330,8 @@ def identify_from_catalog(text: str) -> IdentifyDeviceResponse:
     """Keyword and fuzzy matching against popular models and the catalog (no AI needed)."""
     # 1. A known model named exactly.
     if (model := _known_model(text)) is not None:
-        return _from_model(model, "Matched", "high", "catalog")
+        # Only "high" when we checked the model's own figures, not just its kind's.
+        return _from_model(model, "Matched", "high" if model.has_figures else "medium", "catalog")
 
     # 2. A known model with a typo ("inogn one g5"): compare word windows of the same length.
     words = _normalize(text).split()
@@ -419,7 +456,7 @@ class DeviceIdentifier:
             if media_type is None:
                 raise bad_request("The photo must be a JPEG, PNG, GIF or WebP image.")
             if len(image) > MAX_IMAGE_BYTES:
-                raise bad_request("The photo is too large; please send one under 5 MB.")
+                raise bad_request("The photo is too large; please send one under 3.5 MB.")
         if text is None and image is None:
             raise bad_request("Send the device's name as 'text', or a photo as 'image'.")
         if image is None and (model := _model_with_figures(text)) is not None:
@@ -466,8 +503,8 @@ class DeviceIdentifier:
             )
         except anthropic.BadRequestError as exc:
             logger.warning("Claude rejected the device request: %s", exc)
-            if image is not None and text is None:
-                # Our request is otherwise fixed, so this is the photo (corrupt, unreadable).
+            if image is not None and text is None and "image" in str(exc).lower():
+                # Claude couldn't use the photo itself (corrupt, unreadable, too big).
                 raise bad_request(_UNREADABLE_PHOTO) from exc
             return None
         except (anthropic.AnthropicError, ValidationError) as exc:

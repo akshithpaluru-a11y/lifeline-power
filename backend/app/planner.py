@@ -18,7 +18,8 @@ facts (including `now`) and gets back a `Plan`. The rules, also listed in `docs/
 4. Generators and car inverters add `fuel_hours` of runtime to every device they run.
 5. Everything plugged into one backup runs at once, so together it must fit within the
    backup's maximum output. Life-sustaining devices are plugged in first, choosing the ones that
-   keep the shortest life-sustaining runtime as long as possible.
+   keep the shortest life-sustaining runtime as long as possible. During an outage, re-plans
+   keep the arrangement the family was already shown.
 6. A device with no battery and no usable backup gets status `no_backup` and 0 minutes.
 """
 
@@ -28,6 +29,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from itertools import accumulate, combinations, islice, product
+from math import prod
 
 from app.catalog import BACKUP_CATALOG, FUEL_BACKUP_TYPES, device_spec
 from app.schemas import (
@@ -47,9 +49,9 @@ USABLE_BATTERY_FRACTION = 0.9
 """Share of a device battery's charge that is usable before it cuts out."""
 _TOLERANCE = 1e-6
 _SUGGESTED_STATION_ID = "suggested_power_station"
-_MAX_PLUG_CHOICES = 16
+_MAX_PLUG_CHOICES = 64
 """How many ways of sharing out overloaded backups the planner compares, at most (rule 5)."""
-_PLUG_SEARCH_WORK = 32_768
+_PLUG_SEARCH_WORK = 131_072
 """Work budget for that comparison (see `_choice_limit`), so big households stay fast."""
 _MAX_FILL_STEPS = 2_000
 """Search steps allowed when listing the ways to fill one overloaded backup."""
@@ -215,6 +217,8 @@ class _Outcome:
     plugged: _Plugs
     """Devices each backup actually runs."""
     totals: dict[str, float]
+    kept: Mapping[str, frozenset[str]] | None = None
+    """The arrangement this plan was asked to keep (see `_allocate`), for what-if re-plans."""
 
     @property
     def bottleneck(self) -> str | None:
@@ -240,9 +244,19 @@ class _Outcome:
 
 
 def _allocate(
-    devices: Sequence[DeviceInput], backups: Sequence[BackupInput], *, saver_all: bool
+    devices: Sequence[DeviceInput],
+    backups: Sequence[BackupInput],
+    *,
+    saver_all: bool,
+    keep: Mapping[str, frozenset[str]] | None = None,
 ) -> _Outcome:
-    """Decide which backups run which devices, share out the batteries, return every runtime."""
+    """Decide which backups run which devices, share out the batteries, return every runtime.
+
+    `keep` is an earlier plan's arrangement (backup id -> device ids). Each backup keeps the
+    devices it ran as long as it can still run them all, so a re-plan never quietly assumes the
+    family has moved plugs around. Only devices with no live backup left (new ones, or ones
+    whose backup ran dry) are placed again, in the room that is left.
+    """
     usable = {b.id: b.usable_wh for b in backups if not b.is_fuel}
     unplugged = [_unplugged_load(device, saver_all=saver_all) for device in devices]
     fits_alone = {
@@ -258,7 +272,7 @@ def _allocate(
 
     room = {backup.id: backup.max_output_watts for backup in backups}
     critical_plugs = _choose_plugs(
-        critical, backups, fits_alone, room, critical_score, _choice_limit(usable, critical)
+        critical, backups, fits_alone, room, critical_score, _choice_limit(usable, critical), keep
     )
     plugged_critical = _plug_in(critical, backups, critical_plugs)
     levels = _water_fill(plugged_critical, usable, committed=[])
@@ -279,7 +293,7 @@ def _allocate(
     }
     room = {backup.id: backup.max_output_watts - used[backup.id] for backup in backups}
     other_plugs = _choose_plugs(
-        others, backups, fits_alone, room, others_score, _choice_limit(usable, others)
+        others, backups, fits_alone, room, others_score, _choice_limit(usable, others), keep
     )
     plugged_others = _plug_in(others, backups, other_plugs)
     levels |= _water_fill(plugged_others, usable, committed)
@@ -312,6 +326,7 @@ def _allocate(
         fits_alone=fits_alone,
         plugged=plugged,
         totals=totals,
+        kept=keep,
     )
 
 
@@ -365,6 +380,7 @@ def _choose_plugs(
     room: Mapping[str, float],
     score: Callable[[_Plugs], tuple[float, ...]],
     limit: int,
+    keep: Mapping[str, frozenset[str]] | None = None,
 ) -> _Plugs:
     """Which devices of `group` each backup runs, with `room` watts of output left on each (rule 5).
 
@@ -376,35 +392,87 @@ def _choose_plugs(
     the best `score` wins (the first tried wins ties).
 
     The first combination is a greedy one: each backup in turn takes devices not yet plugged
-    into an earlier backup first, then those with the least battery of their own. At most
-    `limit` combinations are compared, so even a large household is planned at once.
+    into an earlier backup first, then those fewest backups can run, then those with the least
+    battery of their own. When there are at most `limit` combinations, all are compared;
+    otherwise the greedy one is improved one backup at a time, within `limit` comparisons, so
+    even a large household is planned at once.
+
+    With `keep` (see `_allocate`), a backup that can still run every device it ran keeps them,
+    and only devices left with no live backup are candidates for its spare room.
     """
+    keep = keep or {}
+    options = {
+        load.device.id: sum(load.device.id in fits_alone[b.id] for b in backups) for load in group
+    }
+    kept: _Plugs = {}
+    for backup in backups:
+        if backup.id not in keep:
+            continue
+        ids = frozenset(
+            load.device.id
+            for load in group
+            if load.device.id in keep[backup.id] and load.device.id in fits_alone[backup.id]
+        )
+        watts = sum(load.running_watts for load in group if load.device.id in ids)
+        if watts <= room[backup.id] + _TOLERANCE:
+            kept[backup.id] = ids
+    placed = frozenset().union(*kept.values())
+
     settled: _Plugs = {}
     open_ids: list[str] = []
     open_fills: list[list[frozenset[str]]] = []
     plugged_earlier: set[str] = set()
     for backup in backups:
+        fixed = kept.get(backup.id, frozenset())
         candidates = sorted(
-            (load for load in group if load.device.id in fits_alone[backup.id]),
+            (
+                load
+                for load in group
+                if load.device.id in fits_alone[backup.id]
+                and not (backup.id in kept and load.device.id in placed)
+            ),
             key=lambda load: (
                 load.device.id in plugged_earlier,
+                options[load.device.id],
                 load.own_minutes,
                 load.running_watts,
             ),
         )
-        if sum(load.running_watts for load in candidates) <= room[backup.id] + _TOLERANCE:
-            fills = [frozenset(load.device.id for load in candidates)]
+        left = room[backup.id] - sum(x.running_watts for x in group if x.device.id in fixed)
+        if sum(load.running_watts for load in candidates) <= left + _TOLERANCE:
+            fills = [fixed | frozenset(load.device.id for load in candidates)]
             settled[backup.id] = fills[0]
         else:
-            fills = list(islice(_fills(candidates, room[backup.id]), limit))
+            fills = [fixed | fill for fill in islice(_fills(candidates, left), limit)]
             open_ids.append(backup.id)
             open_fills.append(fills)
         plugged_earlier |= fills[0]
-    trials = [
-        settled | dict(zip(open_ids, choice, strict=True))
-        for choice in islice(product(*open_fills), limit)
-    ]
-    return trials[0] if len(trials) == 1 else max(trials, key=score)
+
+    best = settled | {
+        backup_id: fills[0] for backup_id, fills in zip(open_ids, open_fills, strict=True)
+    }
+    if prod(len(fills) for fills in open_fills) <= limit:
+        trials = [
+            settled | dict(zip(open_ids, choice, strict=True)) for choice in product(*open_fills)
+        ]
+        return trials[0] if len(trials) == 1 else max(trials, key=score)
+    # Too many to compare them all: change one backup's fill at a time while that helps,
+    # taking the backups in turn so the budget is spread across all of them.
+    best_score = score(best)
+    budget = limit - 1
+    improved = True
+    while improved and budget > 0:
+        improved = False
+        for index in range(max(len(fills) for fills in open_fills)):
+            for backup_id, fills in zip(open_ids, open_fills, strict=True):
+                if budget <= 0 or index >= len(fills) or fills[index] == best[backup_id]:
+                    continue
+                budget -= 1
+                trial = best | {backup_id: fills[index]}
+                trial_score = score(trial)
+                if trial_score > best_score:
+                    best, best_score, improved = trial, trial_score, True
+    return best
 
 
 def _choice_limit(usable: Mapping[str, float], group: Sequence[_Load]) -> int:
@@ -641,12 +709,16 @@ def build_plan(
     *,
     now: datetime,
     saver_preview: bool = False,
+    keep_plugs: Mapping[str, Iterable[str]] | None = None,
 ) -> Plan:
     """Compute the full plan: per-device runtimes, backup usage, recommendations, assumptions.
 
     With `saver_preview`, every device with a lower-power setting is assumed to use it.
+    `keep_plugs` is the arrangement an earlier plan showed (`plugs_of`), kept where it still
+    works (see `_allocate`).
     """
-    outcome = _allocate(devices, backups, saver_all=saver_preview)
+    keep = None if keep_plugs is None else {b: frozenset(ids) for b, ids in keep_plugs.items()}
+    outcome = _allocate(devices, backups, saver_all=saver_preview, keep=keep)
     device_plans = [_device_plan(load, outcome, backups) for load in outcome.loads]
     critical = outcome.critical_runtime
     return Plan(
@@ -659,6 +731,13 @@ def build_plan(
         recommendations=_recommendations(devices, backups, facts, outcome, saver_preview),
         assumptions=_assumptions(devices, backups, outcome, saver_preview),
     )
+
+
+def plugs_of(plan: Plan) -> dict[str, list[str]] | None:
+    """The arrangement `plan` showed (backup id -> device ids), or None if it doesn't say."""
+    if any(backup.device_ids is None for backup in plan.backups):
+        return None
+    return {backup.backup_id: backup.device_ids or [] for backup in plan.backups}
 
 
 def _device_plan(load: _Load, outcome: _Outcome, backups: Sequence[BackupInput]) -> DevicePlan:
@@ -734,6 +813,8 @@ def _status(
 
 
 def _backup_plan(backup: BackupInput, outcome: _Outcome) -> BackupPlan:
+    plugged = outcome.plugged[backup.id]
+    device_ids = [load.device.id for load in outcome.loads if load.device.id in plugged]
     if backup.is_fuel:
         delivered = sum(
             load.effective_watts * outcome.fuel[load.device.id].get(backup.id, 0.0) / 60
@@ -745,6 +826,7 @@ def _backup_plan(backup: BackupInput, outcome: _Outcome) -> BackupPlan:
             allocated_wh=_round(delivered),
             unused_wh=0.0,
             fuel_minutes=_round((backup.fuel_hours or 0.0) * 60),
+            device_ids=device_ids,
         )
     usable = outcome.usable_wh[backup.id]
     allocated = sum(flows.get(backup.id, 0.0) for flows in outcome.flows.values())
@@ -753,6 +835,7 @@ def _backup_plan(backup: BackupInput, outcome: _Outcome) -> BackupPlan:
         usable_wh=_round(usable),
         allocated_wh=_round(allocated),
         unused_wh=_round(max(0.0, usable - allocated)),
+        device_ids=device_ids,
     )
 
 
@@ -780,7 +863,7 @@ def _recommendations(
         The gain is negative if the change would shorten the critical runtime; each caller
         decides what to do about that rather than having it hidden as 0.
         """
-        trial = _allocate(new_devices, new_backups, saver_all=saver_preview)
+        trial = _allocate(new_devices, new_backups, saver_all=saver_preview, keep=outcome.kept)
         before, after = outcome.critical_runtime, trial.critical_runtime
         gain = None if before is None or after is None else _round(after - before)
         return trial, gain

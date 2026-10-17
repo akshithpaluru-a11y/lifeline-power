@@ -145,22 +145,25 @@ def parse_sites(elements: Iterable[Mapping[str, Any]], lat: float, lon: float) -
         )
     # Most useful first (places that usually have generators), then nearest.
     sites.sort(key=lambda s: (not s.likely_has_power, s.distance_km))
-    return _deduplicate(sites)[:MAX_SITES]
+    return _deduplicate(sites, MAX_SITES)
 
 
-def _deduplicate(sites: list[HelpSite]) -> list[HelpSite]:
-    """Drop repeats: OpenStreetMap often maps a hospital as several buildings with one name."""
+def _deduplicate(sites: list[HelpSite], limit: int) -> list[HelpSite]:
+    """The first `limit` sites without repeats.
+
+    OpenStreetMap often maps a hospital as several buildings with one name. Only sites of the
+    same kind and name are compared, so a big city's thousands of results stay quick.
+    """
     kept: list[HelpSite] = []
+    same_name: dict[tuple[str, str], list[HelpSite]] = {}
     for site in sites:
-        key = re.sub(r"[^a-z0-9]", "", site.name.lower())
-        duplicate = any(
-            other.kind == site.kind
-            and re.sub(r"[^a-z0-9]", "", other.name.lower()) == key
-            and haversine_km(other.lat, other.lon, site.lat, site.lon) < 0.5
-            for other in kept
-        )
-        if not duplicate:
-            kept.append(site)
+        if len(kept) >= limit:
+            break
+        others = same_name.setdefault((site.kind, re.sub(r"[^a-z0-9]", "", site.name.lower())), [])
+        if any(haversine_km(o.lat, o.lon, site.lat, site.lon) < 0.5 for o in others):
+            continue
+        others.append(site)
+        kept.append(site)
     return kept
 
 

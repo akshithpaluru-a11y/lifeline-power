@@ -351,6 +351,11 @@ class BackupPlan(ApiModel):
         default=None,
         description="Additive: run time on the current fuel for generators / car inverters.",
     )
+    device_ids: list[str] | None = Field(
+        default=None,
+        description="Additive: the devices the plan has plugged into this backup. Everything "
+        "listed runs at once. During an outage, re-plans keep this arrangement.",
+    )
 
 
 class Recommendation(ApiModel):

@@ -77,6 +77,10 @@ class DeviceSpec:
     False when the device can run for hours at a stretch (an overnight BiPAP or dialysis
     session, a feed): the planner then counts a life-sustaining one at its full draw, because
     the power can go out just as it is switched on."""
+    emergency_backup: str = "your care team's emergency backup plan"
+    """What to switch to while the device has no power, as in "Switch now to ..."."""
+    saver_outage_action: str = "switch {label} to its lower-power setting"
+    """The saver tip as a step to take during an outage (after a care-team caveat)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +106,8 @@ _DEVICES: tuple[DeviceSpec, ...] = (
     # The tip and action stay so that a figure a family enters still carries the care-team check.
     DeviceSpec(
         kind="oxygen_concentrator_home",
+        emergency_backup="oxygen cylinders if you have them",
+        saver_outage_action="switch {label} to a lower flow setting",
         name="Home oxygen concentrator",
         category="breathing",
         icon="oxygen",
@@ -124,6 +130,8 @@ _DEVICES: tuple[DeviceSpec, ...] = (
     # settings 2-3. Portable units run from their battery or a DC car adapter, so no inverter.
     DeviceSpec(
         kind="oxygen_concentrator_portable",
+        emergency_backup="oxygen cylinders if you have them",
+        saver_outage_action="switch {label} to a lower pulse setting",
         name="Portable oxygen concentrator",
         category="breathing",
         icon="oxygen_portable",
@@ -146,6 +154,7 @@ _DEVICES: tuple[DeviceSpec, ...] = (
     # 20 W is deliberately above what those run times imply.
     DeviceSpec(
         kind="home_ventilator",
+        emergency_backup="a manual resuscitation bag (Ambu bag) if you have one",
         name="Home ventilator",
         category="breathing",
         icon="ventilator",
@@ -167,6 +176,7 @@ _DEVICES: tuple[DeviceSpec, ...] = (
     # 8 hours a day, hence the duty cycle.
     DeviceSpec(
         kind="cpap_bipap",
+        saver_outage_action="turn off the humidifier on {label}",
         name="CPAP / BiPAP",
         category="breathing",
         icon="cpap",
@@ -189,6 +199,7 @@ _DEVICES: tuple[DeviceSpec, ...] = (
     # runtime up to 60 minutes. Suction is used in short bursts, so we count 10% of the time.
     DeviceSpec(
         kind="suction_machine",
+        emergency_backup="a manual suction device if you have one",
         name="Suction machine",
         category="breathing",
         icon="suction",
@@ -210,6 +221,7 @@ _DEVICES: tuple[DeviceSpec, ...] = (
     # Li-ion; capacity isn't published, so we assume 10 Wh and a cautious 0.75 W (about 12 h).
     DeviceSpec(
         kind="enteral_feeding_pump",
+        emergency_backup="gravity or syringe feeding if your care team has shown you how",
         name="Feeding pump",
         category="feeding",
         icon="feeding_pump",
@@ -309,6 +321,7 @@ _DEVICES: tuple[DeviceSpec, ...] = (
     # hemodialysis machines can use far more.
     DeviceSpec(
         kind="home_dialysis",
+        emergency_backup="your dialysis center's emergency plan",
         name="Home dialysis machine",
         category="therapy",
         icon="dialysis",

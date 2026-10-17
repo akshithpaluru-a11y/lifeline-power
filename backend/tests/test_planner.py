@@ -23,9 +23,11 @@ def plan(
     devices: list[DeviceInput],
     backups: list[BackupInput] | None = None,
     facts: HouseholdFacts | None = None,
-    **kwargs: bool,
+    saver_preview: bool = False,
 ) -> Plan:
-    return build_plan(devices, backups or [], facts or HouseholdFacts(), now=NOW, **kwargs)
+    return build_plan(
+        devices, backups or [], facts or HouseholdFacts(), now=NOW, saver_preview=saver_preview
+    )
 
 
 def minutes(result: Plan, device_id: str) -> float:

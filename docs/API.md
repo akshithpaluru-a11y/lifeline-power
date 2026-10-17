@@ -317,11 +317,13 @@ stations.
 `image` (photo of the device's label). Returns
 ```json
 {
-  "match": { "kind": "oxygen_concentrator_portable", "label": "Inogen One G5", "draw_watts": 28, "internal_battery_wh": 99 },
+  "match": { "kind": "oxygen_concentrator_portable", "label": "Inogen One G5", "draw_watts": 83, "internal_battery_wh": 92 },
   "confidence": "high",          // high | medium | low
-  "source": "ai",                // ai | catalog (keyword match fallback when no API key is configured)
-  "explanation": "Label shows Inogen One G5; 8-cell battery is about 99 Wh."
+  "source": "catalog",           // ai (Claude read it) | catalog (our checked model list or keyword matching, no Claude call)
+  "explanation": "Matched Inogen One G5. These figures assume the highest setting (6): ..."
 }
 ```
-Uses Claude when `ANTHROPIC_API_KEY` is set; otherwise falls back to keyword matching against the
-catalog and returns `source: "catalog"`.
+A typed name of a model we have checked figures for is answered from our list without calling
+Claude (`source: "catalog"`). Anything else uses Claude when `ANTHROPIC_API_KEY` is set
+(`source: "ai"`); without a key, or if Claude fails, text falls back to keyword matching against
+the catalog (`source: "catalog"`).

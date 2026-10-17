@@ -148,8 +148,11 @@ what would help most?* The rules, which the app also shows to families:
    *shortest* runtime among life-sustaining devices as long as possible. AC devices lose 15% to
    the inverter. A backup can't run an AC device without an AC outlet, and the devices it runs
    together must fit within its maximum output, so life-sustaining devices are plugged in first
-   (choosing the set that keeps the shortest life-sustaining runtime longest).
-   Non-life-sustaining devices share whatever is left.
+   (choosing the set that keeps the shortest life-sustaining runtime longest: every arrangement
+   is compared for a typical home, a step-by-step search for bigger ones). Non-life-sustaining
+   devices share whatever is left. The plan lists what goes into each backup, and during an
+   outage every re-plan keeps that arrangement, so the countdown never jumps because the app
+   quietly assumed someone moved a plug.
 4. **Fuel.** Generators and car inverters add one tank's run time (`fuel_hours`) to every device
    they can run at once, life-sustaining devices first, up to their output limit. They always
    come with a carbon-monoxide warning.

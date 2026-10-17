@@ -10,6 +10,7 @@ import pytest
 from app.catalog import DEVICE_CATALOG
 from app.outage_engine import advance_state
 from app.planner import (
+    _MAX_PLUG_CHOICES,
     BackupInput,
     DeviceInput,
     HouseholdFacts,
@@ -25,9 +26,13 @@ NOW = datetime(2026, 10, 20, 18, 0, tzinfo=UTC)
 
 
 def plan(
-    devices: list[DeviceInput], backups: list[BackupInput] | None = None, **kwargs: bool
+    devices: list[DeviceInput],
+    backups: list[BackupInput] | None = None,
+    saver_preview: bool = False,
 ) -> Plan:
-    return build_plan(devices, backups or [], HouseholdFacts(), now=NOW, **kwargs)
+    return build_plan(
+        devices, backups or [], HouseholdFacts(), now=NOW, saver_preview=saver_preview
+    )
 
 
 def entry(result: Plan, device_id: str) -> DevicePlan:
@@ -182,7 +187,7 @@ def test_large_households_fall_back_to_the_greedy_choice_quickly() -> None:
     ]
     usable = {f"s{i}": 500.0 for i in range(8)}
     assert _choice_limit(usable, loads) == 1
-    assert _choice_limit({"s": 1000.0}, loads[:4]) == 16
+    assert _choice_limit({"s": 1000.0}, loads[:4]) == _MAX_PLUG_CHOICES
     devices = [device(f"d{i}", draw_watts=30 + 7 * i) for i in range(20)]
     backups = [station(f"s{i}", max_output_watts=250 + 20 * i) for i in range(8)]
     result = plan(devices, backups)

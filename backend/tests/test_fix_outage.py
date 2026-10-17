@@ -5,6 +5,7 @@ order of the countdown milestones, the help site that `leave_by` is timed on, mi
 alerts, very long runtimes and caregiver acknowledgements.
 """
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qs
@@ -231,9 +232,8 @@ def test_announced_halfway_stays_on_the_timeline() -> None:
     # A check-in at 200 min finds only 40 min left: it's time to leave.
     check_in_at = START + timedelta(minutes=200)
     rebuilt = build_milestones(critical_plan(40), context(plan_at=check_in_at), previous=first)
-    halfway = by_key(rebuilt, "halfway")
-    assert halfway.passed
-    assert halfway.detail.startswith("About 40 min left")
+    # It stays exactly as caregivers were told it (not rewritten to "40 min left").
+    assert by_key(rebuilt, "halfway") == by_key(first, "halfway")
 
 
 def test_no_power_at_all_says_the_device_has_stopped() -> None:
@@ -312,9 +312,11 @@ def test_conserve_puts_the_care_team_caveat_before_saver_tips() -> None:
     )
     plan = build_plan([poc], [], FACTS, now=START)
     assert any(r.kind == "saver_mode" for r in plan.recommendations)
-    conserve = by_key(build_milestones(plan, context(labels={"poc": "Inogen"})), "conserve")
-    caveat = conserve.detail.index("Only if your care team has said it is safe")
-    assert caveat < conserve.detail.index("lower pulse setting")
+    ctx = replace(context(labels={"poc": "Inogen"}), device_kinds={"poc": poc.kind})
+    conserve = by_key(build_milestones(plan, ctx), "conserve")
+    caveat = conserve.detail.index("Only if your care team has already approved it")
+    assert caveat < conserve.detail.index("switch Inogen to a lower pulse setting")
+    assert "Ask your care team" not in conserve.detail
 
 
 # --- Findings 24 and 43: leave_by is timed on a place likely to have power ------------------

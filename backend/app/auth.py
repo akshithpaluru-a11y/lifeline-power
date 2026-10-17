@@ -105,10 +105,10 @@ def confirm_still_member(principal: Principal, household: models.Household) -> N
 
 
 def client_key(host: str | None) -> str:
-    """Who is making a request, for `JoinCodeGuard`: an IP address, or an IPv6 /64 network.
+    """Who is making a request, for `JoinCodeGuard`: an IP address, or an IPv6 /56 network.
 
-    A home or an attacker usually has a whole IPv6 /64, so counting each address in it on its
-    own would let guesses rotate through them.
+    A home or an attacker usually has a whole IPv6 /56 (ISPs hand out /56 or /48 blocks), so
+    counting each address or /64 in it on its own would let guesses rotate through them.
     """
     if not host:
         return "unknown"
@@ -119,7 +119,7 @@ def client_key(host: str | None) -> str:
     if isinstance(address, ipaddress.IPv6Address):
         if address.ipv4_mapped is not None:
             return str(address.ipv4_mapped)
-        return str(ipaddress.ip_network((address, 64), strict=False))
+        return str(ipaddress.ip_network((address, 56), strict=False))
     return str(address)
 
 
@@ -143,7 +143,10 @@ class JoinCodeGuard:
 
     An attempt counts as wrong from the moment it starts until it succeeds, so a burst of
     parallel guesses can't all get through before any of them has failed. While a limit is
-    reached, attempts are refused without looking at the code at all.
+    reached, attempts are refused without looking at the code at all, except that a client with
+    no wrong codes in the window still gets one try while only the overall limit is reached:
+    otherwise anyone could pause joining for every family by sending wrong codes from many
+    addresses. Guesses per window then stay bounded by the number of distinct clients.
 
     The counts live in memory, like the event broker's subscriptions: one server process.
     """
@@ -169,11 +172,11 @@ class JoinCodeGuard:
                 f"Too many tries with a wrong join code. Wait {minutes} minutes, then check "
                 "the code with the family."
             )
-        if self._wrong_total >= self._overall:
+        if self._wrong_total >= self._overall and self._wrong_by_client[client] > 0:
             logger.warning("Refused a join attempt: too many wrong join codes from everyone")
             raise _too_many_attempts(
-                "Joining is paused for a few minutes because of many wrong join codes. Please "
-                "try again later."
+                "Many wrong join codes have been tried recently, so joining is limited for now. "
+                "Check the code with the family, then try again later."
             )
         attempt = JoinAttempt(client, now)
         self._attempts.append(attempt)

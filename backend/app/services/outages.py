@@ -35,7 +35,7 @@ from app.outage_engine import (
     merge_with_household,
     outage_minutes_between,
 )
-from app.planner import BackupInput, DeviceInput, build_plan
+from app.planner import BackupInput, DeviceInput, build_plan, plugs_of
 from app.services.households import backup_input, device_input, household_facts
 from app.timeutil import Clock
 
@@ -92,6 +92,10 @@ def _load_energy_state(state: dict[str, Any]) -> tuple[list[DeviceInput], list[B
 
 def _labels(household: models.Household) -> dict[str, str]:
     return {device.id: device.label for device in household.devices}
+
+
+def _kinds(household: models.Household) -> dict[str, str]:
+    return {device.id: device.kind for device in household.devices}
 
 
 async def active_outage(session: AsyncSession, household_id: str) -> models.Outage | None:
@@ -170,6 +174,7 @@ class OutageService:
                 last_check_in_at=now,
                 help_target=target,
                 device_labels=_labels(household),
+                device_kinds=_kinds(household),
             )
             outage = models.Outage(
                 id=new_id("og"),
@@ -237,7 +242,15 @@ class OutageService:
             )
             devices, backups = apply_reports(devices, backups, device_charge, backup_levels)
 
-            plan = build_plan(devices, backups, household_facts(household), now=now)
+            # Keep the plugs where the family put them: a re-plan that quietly moved a device
+            # to another backup would push the countdown later without telling anyone.
+            plan = build_plan(
+                devices,
+                backups,
+                household_facts(household),
+                now=now,
+                keep_plugs=plugs_of(old_plan),
+            )
             timeline = TimelineContext(
                 source=outage.source,
                 speed=outage.speed,
@@ -246,6 +259,7 @@ class OutageService:
                 last_check_in_at=now,
                 help_target=HelpTarget(outage.help_site_name, outage.travel_minutes),
                 device_labels=_labels(household),
+                device_kinds=_kinds(household),
             )
             outage.plan = plan.model_dump(mode="json")
             outage.milestones = dump_milestones(

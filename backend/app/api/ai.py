@@ -39,7 +39,7 @@ _REQUEST_BODY: dict[str, Any] = {
                     "image": {
                         "type": "string",
                         "format": "binary",
-                        "description": "Photo of the label (JPEG, PNG, GIF or WebP, under 5 MB).",
+                        "description": "Photo of the label (JPEG, PNG, GIF or WebP, under 3.5 MB).",
                     },
                     "text": {
                         "type": "string",
@@ -66,7 +66,7 @@ async def identify_device(request: Request, context: ContextDep) -> IdentifyDevi
 
 async def _read_form(request: Request) -> tuple[str | None, bytes | None, str | None]:
     """The text, photo bytes and photo type from a multipart upload."""
-    too_large = "The photo is too large; please send one under 5 MB."
+    too_large = "The photo is too large; please send one under 3.5 MB."
     async with _limited(request, _MAX_FORM_BYTES, too_large).form(
         max_files=1, max_fields=4, max_part_size=_MAX_TEXT_FIELD_BYTES
     ) as form:

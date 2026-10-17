@@ -12,15 +12,17 @@ about `speed`.
 """
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 
 from app import help_sites
+from app.catalog import device_spec
 from app.planner import (
     INVERTER_EFFICIENCY,
     USABLE_BATTERY_FRACTION,
     BackupInput,
     DeviceInput,
+    counted_at_full_draw,
     effective_draw_watts,
     incompatibility,
     own_battery_wh,
@@ -51,11 +53,6 @@ MAX_TIMELINE_MINUTES = 10 * 365 * 24 * 60.0
 Only implausible figures (a fraction of a watt on huge batteries) give runtimes that long, and
 `datetime` stops at the year 9999, so without this cap such a plan would crash the outage.
 """
-EMERGENCY_BACKUP = (
-    "your emergency backup, such as oxygen cylinders or a manual resuscitation bag if you have them"
-)
-"""What to use while a life-sustaining device has no power (in the alerts that say so)."""
-
 _START_KEYS: frozenset[str] = frozenset({"power_lost", "conserve"})
 _TOLERANCE = 1e-9
 
@@ -108,6 +105,8 @@ class TimelineContext:
     last_check_in_at: datetime
     help_target: HelpTarget
     device_labels: Mapping[str, str]
+    device_kinds: Mapping[str, str] = field(default_factory=dict)
+    """Device id -> kind, for advice that depends on the device (its emergency backup)."""
 
 
 def to_real_time(origin: datetime, outage_minutes: float, speed: float) -> datetime:
@@ -133,6 +132,8 @@ def build_milestones(
     announces it when its time comes (even if that is right away). On a brand-new outage the
     start milestones are passed immediately, because `outage_started` announces them; a rebuild
     keeps them exactly as they were announced, since they describe the moment the power went out.
+    An announced halfway alert that is still in the past is kept as announced too: it is a
+    record of what caregivers were told, not a new warning.
     """
     announced = {m.key: m for m in previous or () if m.key in _START_KEYS}
     start_milestones = [
@@ -146,12 +147,13 @@ def build_milestones(
                 "info",
             ),
             _milestone(
-                "conserve", ctx.started_at, "Save power now", _conserve_detail(plan), "info"
+                "conserve", ctx.started_at, "Save power now", _conserve_detail(plan, ctx), "info"
             ),
         )
     ]
 
     was_passed = {m.key: m.passed for m in previous or ()}
+    sent_halfway = next((m for m in previous or () if m.key == "halfway" and m.passed), None)
     timeline = [
         _milestone(
             "check_in",
@@ -170,7 +172,9 @@ def build_milestones(
         )
 
     timeline = start_milestones + [
-        item.model_copy(
+        sent_halfway
+        if sent_halfway is not None and item.key == "halfway" and item.at <= ctx.plan_at
+        else item.model_copy(
             update={"passed": was_passed.get(item.key, False) and item.at <= ctx.plan_at}
         )
         for item in timeline
@@ -218,7 +222,7 @@ def _countdown_milestones(
             )
         )
 
-    milestones.append(_leave_by(ctx, device, remaining, at(leave_in), leave_in > 0))
+    milestones.append(_leave_by(plan, ctx, device, remaining, at(leave_in), leave_in > 0))
     if remaining <= travel:
         critical_low_detail = (
             f"{device} is close to running out and there isn't enough battery to reach power. "
@@ -258,7 +262,7 @@ def _countdown_milestones(
 
 
 def _leave_by(
-    ctx: TimelineContext, device: str, remaining: float, when: datetime, ahead: bool
+    plan: Plan, ctx: TimelineContext, device: str, remaining: float, when: datetime, ahead: bool
 ) -> Milestone:
     """When to set off for the help site, or a 911 alert if the battery can't last the drive.
 
@@ -283,7 +287,7 @@ def _leave_by(
             "leave_by",
             when,
             "Not enough battery to reach power",
-            f"{situation} Call 911 now. While you wait, use {EMERGENCY_BACKUP}.",
+            f"{situation} Call 911 now. While you wait, use {_emergency_backup(plan, ctx)}.",
             "critical",
         )
     if name:
@@ -300,6 +304,12 @@ def _leave_by(
         detail,
         "warning",
     )
+
+
+def _emergency_backup(plan: Plan, ctx: TimelineContext) -> str:
+    """What to switch to while the device that runs out first has no power."""
+    kind = ctx.device_kinds.get(plan.bottleneck_device_id or "", "custom")
+    return device_spec(kind).emergency_backup
 
 
 def _bottleneck_label(plan: Plan, ctx: TimelineContext) -> str:
@@ -327,24 +337,30 @@ def _power_lost_detail(plan: Plan, ctx: TimelineContext) -> str:
     if critical is not None and critical <= 0:
         return (
             f"{_bottleneck_label(plan, ctx)} has no battery or backup power, so it stopped when "
-            f"the power went out. Switch now to {EMERGENCY_BACKUP}, and call 911 if you can't get "
-            "power right away."
+            f"the power went out. Switch now to {_emergency_backup(plan, ctx)}, and call 911 if "
+            "you can't get power right away."
         )
     return "Devices are running on batteries and backup power now."
 
 
-def _conserve_detail(plan: Plan) -> str:
+def _conserve_detail(plan: Plan, ctx: TimelineContext) -> str:
     """Advice for the first minutes of an outage, including the plan's saver-mode tips.
 
     Saver tips change how a medical device runs (for an oxygen concentrator, the dose), so they
-    always come after the care-team caveat, never as a bare instruction.
+    always come after one care-team caveat, never as a bare instruction. They are phrased as
+    steps to take now, not as the questions for the care team that the plan's tips ask.
     """
-    tips = [r.title for r in plan.recommendations if r.kind == "saver_mode"]
+    steps = []
+    for rec in plan.recommendations:
+        device_id = rec.id.removeprefix("saver_")
+        if rec.kind == "saver_mode" and device_id in ctx.device_labels:
+            spec = device_spec(ctx.device_kinds.get(device_id, "custom"))
+            steps.append(spec.saver_outage_action.format(label=ctx.device_labels[device_id]))
     detail = "Unplug everything that isn't medical and keep the fridge closed."
-    if tips:
+    if steps:
         detail += (
-            " Lower-power settings can make batteries last longer. Only if your care team has "
-            "said it is safe: " + "; ".join(tips) + "."
+            " Lower-power settings make batteries last longer. Only if your care team has "
+            "already approved it: " + "; ".join(steps) + "."
         )
     return detail
 
@@ -451,7 +467,10 @@ def advance_state(
     outlet and keeps its own battery full. The energy its battery didn't supply (plus any charge
     it gained) is then taken from the shared batteries that can run it (its plan's allocations
     first, then any other), and only after those from its spares. Without this a truthful
-    "100%" would hide the station's drain and the countdown would never go down. A reading at
+    "100%" would hide the station's drain and the countdown would never go down. Devices used
+    now and then (a wheelchair) are the exception: their estimate is a daily average, so a high
+    reading may just mean light use, and only the charge they *gained* is taken from elsewhere.
+    A reading at
     or below the estimate changes nothing here (the caller applies it): a battery that drained
     faster than expected says nothing about the shared ones, and handing their energy back would
     be guessing in the unsafe direction.
@@ -501,9 +520,16 @@ def advance_state(
     for item in plugged_in:
         device = item.device
         full_wh = device.internal_battery_wh * USABLE_BATTERY_FRACTION
-        from_internal = (device.charge_percent - item.reading) / 100 * full_wh  # < 0: it charged
         efficiency = _inverter_efficiency(device)
-        to_draw = (item.used_wh - from_internal) / efficiency
+        if device.duty_cycle < 1 and not counted_at_full_draw(device):
+            # Its estimate is a daily average (a wheelchair, a fridge), so a high reading may
+            # just mean it was used less than average. Only charge it *gained* since the plan
+            # must have come from somewhere else.
+            gained_wh = max(0.0, item.reading - device.charge_percent) / 100 * full_wh
+            to_draw = gained_wh / efficiency
+        else:
+            from_internal = (device.charge_percent - item.reading) / 100 * full_wh  # < 0: charged
+            to_draw = (item.used_wh - from_internal) / efficiency
         allocations = _battery_allocations(item.plan, fuel_ids)
         to_draw = _take_proportionally(left_wh, allocations, to_draw)
         others = {

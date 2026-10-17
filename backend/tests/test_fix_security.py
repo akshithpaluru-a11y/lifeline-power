@@ -139,21 +139,25 @@ async def test_guessing_from_many_addresses_hits_an_overall_limit(
     for i in range(clients):
         for _ in range(per_client):
             await join_as(app, f"192.0.2.{i + 1}", wrong_code(home))
+    # A client that has already guessed wrong is refused once everyone together hit the limit...
+    await join_as(app, "198.51.100.200", wrong_code(home))
     response = await join_as(app, "198.51.100.200", home.join_code)
     assert response.status_code == 429
     assert response.json()["error"]["code"] == "unavailable"
+    # ...but someone with no wrong codes still gets a try, so guessing can't pause every join.
+    assert (await join_as(app, "198.51.100.77", home.join_code)).status_code == 201
 
 
 async def test_ipv6_guesses_count_per_network(
     app: FastAPI, context: AppContext, home: Home
 ) -> None:
-    # One home or attacker usually controls a whole /64, so rotating addresses inside it
-    # doesn't buy more guesses.
+    # One home or attacker usually controls a whole /56, so rotating addresses or /64s inside
+    # it doesn't buy more guesses.
     for i in range(context.settings.join_attempts_per_client):
-        response = await join_as(app, f"2001:db8:1:2::{i + 1:x}", wrong_code(home))
+        response = await join_as(app, f"2001:db8:1:{i:x}::{i + 1:x}", wrong_code(home))
         assert response.status_code == 404
-    assert (await join_as(app, "2001:db8:1:2::ffff", home.join_code)).status_code == 429
-    assert (await join_as(app, "2001:db8:1:3::1", home.join_code)).status_code == 201
+    assert (await join_as(app, "2001:db8:1:ff::1", home.join_code)).status_code == 429
+    assert (await join_as(app, "2001:db8:1:100::1", home.join_code)).status_code == 201
 
 
 async def test_successful_joins_do_not_use_up_the_limit(
@@ -169,8 +173,8 @@ async def test_successful_joins_do_not_use_up_the_limit(
     ("host", "key"),
     [
         ("203.0.113.5", "203.0.113.5"),
-        ("2001:db8:1:2::7", "2001:db8:1:2::/64"),
-        ("2001:db8:1:2:aaaa:bbbb:cccc:dddd", "2001:db8:1:2::/64"),
+        ("2001:db8:1:2::7", "2001:db8:1::/56"),
+        ("2001:db8:1:2aa:bbbb:bbbb:cccc:dddd", "2001:db8:1:200::/56"),
         ("::ffff:203.0.113.5", "203.0.113.5"),
         ("testclient", "testclient"),
         (None, "unknown"),
@@ -194,10 +198,16 @@ def test_join_code_guard_counts_wrong_codes_in_a_sliding_window() -> None:
     guard.succeeded(guard.begin("b"))  # right codes don't count
     guard.begin("b")
     guard.begin("c")
-    with pytest.raises(ApiError):  # 5 wrong codes in all
+    with pytest.raises(ApiError):  # 5 wrong codes in all, and "c" has guessed wrong already
+        guard.begin("c")
+    guard.begin("d")  # a client with no wrong codes still gets one try
+    with pytest.raises(ApiError):
         guard.begin("d")
 
     clock.advance(minutes=7, seconds=1)  # the first wrong code from "a" is now 10 minutes old
+    with pytest.raises(ApiError):  # still 5 in all
+        guard.begin("a")
+    clock.advance(minutes=1)  # and its second
     guard.begin("a")
     with pytest.raises(ApiError):
         guard.begin("a")
@@ -572,9 +582,9 @@ async def test_identify_device_requests_that_still_work(client: httpx.AsyncClien
     # A photo alone (with an empty text field) still reaches the photo path.
     response = await client.post(IDENTIFY_URL, files={"text": (None, ""), "image": PHOTO})
     assert response.status_code == 503  # no API key in tests: photos need Claude
-    big_jpeg = b"\xff\xd8\xff" + b"\xff" * 4_000_000  # starts like a JPEG: photos are sniffed
+    big_jpeg = b"\xff\xd8\xff" + b"\xff" * 3_400_000  # starts like a JPEG: photos are sniffed
     response = await client.post(IDENTIFY_URL, files={"image": ("big.jpg", big_jpeg)})
-    assert response.status_code == 503  # a 4 MB photo is within the limit
+    assert response.status_code == 503  # a 3.4 MB photo is within the limit
 
 
 class CountingBody:
@@ -605,7 +615,7 @@ async def test_chunked_photo_upload_is_cut_off_at_the_limit(client: httpx.AsyncC
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
     )
     assert response.status_code == 400
-    assert "under 5 MB" in response.json()["error"]["message"]
+    assert "under 3.5 MB" in response.json()["error"]["message"]
     assert body.sent <= 7 * 1024 * 1024
 
 
