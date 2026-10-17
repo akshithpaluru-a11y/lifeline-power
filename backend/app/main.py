@@ -9,11 +9,13 @@ import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
+from pathlib import Path
 
 import anthropic
 import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from app import __version__
 from app.ai import DeviceIdentifier
@@ -22,7 +24,7 @@ from app.auth import JoinCodeGuard
 from app.config import Settings, get_settings
 from app.context import AppContext
 from app.db import Database
-from app.errors import install_error_handlers
+from app.errors import install_error_handlers, not_found
 from app.events import EventBroker
 from app.geocoding import Geocoder
 from app.help_sites import HelpSiteFinder
@@ -129,8 +131,27 @@ def create_app(settings: Settings | None = None, *, clock: Clock = utcnow) -> Fa
     )
     install_error_handlers(app)
     app.include_router(api_router)
+    if settings.static_dir is not None:
+        _serve_web_app(app, settings.static_dir)
     logging.getLogger("uvicorn.access").addFilter(_REDACT_TOKENS)
     return app
+
+
+def _serve_web_app(app: FastAPI, root: Path) -> None:
+    """Serve the built web app from `root`. Its own routes (`/live`, `/join`) get `index.html`."""
+    root = root.resolve()
+    index = root / "index.html"
+    if not index.is_file():
+        raise RuntimeError(f"LIFELINE_STATIC_DIR has no index.html: {root}")
+
+    @app.get("/{path:path}", include_in_schema=False)
+    async def web_app(path: str) -> FileResponse:
+        if path == "api" or path.startswith("api/"):
+            raise not_found("No such API endpoint.")
+        file = (root / path).resolve()
+        if path and file.is_file() and file.is_relative_to(root):
+            return FileResponse(file)
+        return FileResponse(index, headers={"Cache-Control": "no-cache"})
 
 
 app = create_app()

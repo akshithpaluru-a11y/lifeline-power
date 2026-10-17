@@ -68,6 +68,7 @@ Environment variables (or a `.env` file in the working directory):
 |---|---|---|
 | `LIFELINE_DB` | `backend/lifeline.db` | SQLite database file |
 | `LIFELINE_CORS_ORIGINS` | `*` | Comma-separated allowed origins |
+| `LIFELINE_STATIC_DIR` | unset | Built web app (`frontend/dist`) to serve at `/`, so app and API share one origin |
 | `ANTHROPIC_API_KEY` | unset | Enables Claude for the device helper (photos need it) |
 | `ANTHROPIC_MODEL` | `claude-haiku-5-5` | Model used by the device helper |
 | `LIFELINE_AI_TIMEOUT_SECONDS` | `30` | Timeout for a Claude request |
@@ -78,7 +79,7 @@ Environment variables (or a `.env` file in the working directory):
 | `LIFELINE_NOMINATIM_URL` | `https://nominatim.openstreetmap.org` | OpenStreetMap geocoder |
 | `LIFELINE_CENSUS_GEOCODER_URL` | `https://geocoding.geo.census.gov/geocoder` | US Census geocoder |
 | `LIFELINE_HTTP_TIMEOUT_SECONDS` | `8` | Timeout for each map-service request |
-| `LIFELINE_JOIN_ATTEMPTS_PER_CLIENT` | `10` | Wrong join codes allowed per client (IP or IPv6 /64) per window |
+| `LIFELINE_JOIN_ATTEMPTS_PER_CLIENT` | `10` | Wrong join codes allowed per client (IP or IPv6 /56) per window |
 | `LIFELINE_JOIN_ATTEMPTS_OVERALL` | `200` | Wrong join codes allowed from everyone together per window |
 | `LIFELINE_JOIN_ATTEMPT_WINDOW_SECONDS` | `900` | Join-code rate-limit window |
 | `LIFELINE_USER_AGENT` | `LifeLinePower/1.0 (...)` | Sent to map services, as their usage policies ask |

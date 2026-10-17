@@ -1,0 +1,13 @@
+# Render Blueprint: one free web service running the Dockerfile (web app + API on one origin).
+# The free plan sleeps after 15 idle minutes and has no disk, so the SQLite database starts
+# empty after each restart or deploy: fine for demos, not for real families.
+services:
+  - type: web
+    name: lifeline-power
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false

@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     db: Path = BACKEND_DIR / "lifeline.db"
     cors_origins: str = "*"
     """Comma-separated list of allowed origins; `*` allows any origin (fine for development)."""
+    static_dir: Path | None = None
+    """The built web app (`frontend/dist`). When set, it is served at `/`, so the app and the
+    API share one origin (the deployed setup)."""
 
     ticker_enabled: bool = True
     ticker_interval_seconds: float = Field(default=2.0, gt=0)
@@ -29,7 +32,7 @@ class Settings(BaseSettings):
 
     # Limits on wrong join codes, so codes can't be guessed (see `auth.JoinCodeGuard`).
     join_attempts_per_client: int = Field(default=10, ge=1)
-    """Wrong join codes one IP address (or IPv6 /64) may try per window."""
+    """Wrong join codes one IP address (or IPv6 /56) may try per window."""
     join_attempts_overall: int = Field(default=200, ge=1)
     """Wrong join codes everyone together may try per window, against guessing from many
     addresses at once."""
