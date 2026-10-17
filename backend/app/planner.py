@@ -813,8 +813,16 @@ def _status(
 
 
 def _backup_plan(backup: BackupInput, outcome: _Outcome) -> BackupPlan:
+    # What to plug in. A generator runs everything plugged into it at once. A battery lists
+    # only devices that get some of its energy: plugging in one the plan gives nothing (say a
+    # CPAP when the oxygen needs the whole station) would drain energy the plan counts on.
     plugged = outcome.plugged[backup.id]
-    device_ids = [load.device.id for load in outcome.loads if load.device.id in plugged]
+    device_ids = [
+        load.device.id
+        for load in outcome.loads
+        if load.device.id in plugged
+        and (backup.is_fuel or outcome.flows[load.device.id].get(backup.id, 0.0) > _TOLERANCE)
+    ]
     if backup.is_fuel:
         delivered = sum(
             load.effective_watts * outcome.fuel[load.device.id].get(backup.id, 0.0) / 60

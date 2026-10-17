@@ -137,7 +137,9 @@ def test_a_device_whose_backup_ran_dry_moves_to_one_with_room() -> None:
     plan = build_plan([vent, o2], [empty, spare], FACTS, now=START)
     keep = {"empty": ["o2"], "spare": ["vent"]}  # o2 was on the station that is now empty
     kept = build_plan([vent, o2], [empty, spare], FACTS, now=START, keep_plugs=keep)
-    assert plugs_of(kept) == {"empty": [], "spare": ["vent", "o2"]}
+    # The ventilator's own battery outlasts what the station can give the oxygen, so the
+    # station's energy (and its plug list) goes to the oxygen.
+    assert plugs_of(kept) == {"empty": [], "spare": ["o2"]}
     assert kept.critical_runtime_minutes == plan.critical_runtime_minutes
 
 
@@ -348,3 +350,27 @@ def test_conserve_steps_are_actions_after_one_care_team_caveat() -> None:
     assert detail.count("care team") == 1, detail
     assert "Only if your care team has already approved it:" in detail
     assert "switch Sam's oxygen_concentrator_home to a lower flow setting" in detail
+
+
+def test_the_plug_list_leaves_out_devices_a_battery_gives_nothing() -> None:
+    # The sample home: oxygen needs the whole Jackery, so the CPAP (not life-sustaining) gets
+    # none of it and must not be listed for plugging in.
+    o2 = catalog_device("oxygen_concentrator_portable")
+    cpap = catalog_device("cpap_bipap", life_sustaining=False, internal_battery_wh=0)
+    pump = catalog_device("enteral_feeding_pump")
+    jackery = station("jackery", capacity_wh=512, max_output_watts=500)
+    plan = build_plan([o2, cpap, pump], [jackery], FACTS, now=START)
+    cpap_plan = next(d for d in plan.devices if d.device_id == cpap.id)
+    assert cpap_plan.allocations == []
+    listed = (plugs_of(plan) or {})["jackery"]
+    assert cpap.id not in listed
+    for device_id in listed:
+        entry = next(d for d in plan.devices if d.device_id == device_id)
+        assert any(a.backup_id == "jackery" and a.energy_wh > 0 for a in entry.allocations)
+
+
+def test_a_generator_lists_everything_it_runs() -> None:
+    a = device("a", draw_watts=50, internal_battery_wh=500)  # outlasts the fuel on its own
+    b = device("b", draw_watts=50)
+    car = generator("car", type="car_inverter", max_output_watts=150, fuel_hours=2)
+    assert (plugs_of(build_plan([a, b], [car], FACTS, now=START)) or {})["car"] == ["a", "b"]

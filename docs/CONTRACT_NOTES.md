@@ -8,7 +8,7 @@ the contract was renamed, removed or retyped.
 | Where | Field | Meaning |
 |---|---|---|
 | `Plan.devices[]` | `status_detail` (string or null) | Plain-English reason for `limited` / `no_backup`, e.g. "Jackery has no AC outlet". Null when `ok`. |
-| `Plan.backups[]` | `device_ids` (string[]) | The devices the plan has plugged into this backup; everything listed runs at once. Show it as "Plug these into ...". During an outage, check-ins keep this arrangement (see Outages). |
+| `Plan.backups[]` | `device_ids` (string[]) | What to plug into this backup; everything listed runs at once. Show it as "Plug these into ...". A generator or car lists every device it runs; a battery lists only devices that get some of its energy (`allocations[].energy_wh > 0`), so a device the plan gives nothing is never plugged in to drain it. During an outage, check-ins keep this arrangement (see Outages). |
 | `Plan.backups[]` | `fuel_minutes` (number or null) | Generators and car inverters: run time on one tank. Null for batteries. For these backups `usable_wh` and `allocated_wh` are the energy delivered to the devices they run over that time, and `unused_wh` is 0. |
 | `Recommendation.kind` | `"safety"` | One more kind: the carbon-monoxide warning (`id: "co_safety"`, `gain_minutes: null`) shown whenever there is a generator or car inverter. Safety items always come first. |
 | `Outage` | `last_check_in_ok` (bool) | False when the owner's latest check-in sent `ok: false` ("I need help"). |

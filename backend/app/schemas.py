@@ -353,8 +353,9 @@ class BackupPlan(ApiModel):
     )
     device_ids: list[str] | None = Field(
         default=None,
-        description="Additive: the devices the plan has plugged into this backup. Everything "
-        "listed runs at once. During an outage, re-plans keep this arrangement.",
+        description="Additive: what to plug into this backup (everything listed runs at once). "
+        "A battery lists only devices that get some of its energy. During an outage, re-plans "
+        "keep this arrangement.",
     )
 
 
