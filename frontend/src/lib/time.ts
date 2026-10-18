@@ -1,4 +1,4 @@
-import type { Outage, Plan } from './types'
+import type { Milestone, Outage, Plan } from './types'
 
 /** Wall-clock moment a device's battery runs out, honoring drill speed. */
 export function deadline(outage: Outage, minutes: number) {
@@ -18,3 +18,9 @@ export function criticalLeft(outage: Outage, now: number) {
 }
 
 export const minutesFor = (plan: Plan | null, deviceId: string) => plan?.devices.find((d) => d.device_id === deviceId)?.total_minutes ?? 0
+
+/** Replace a milestone by key, or add it (the server can send new ones such as `replug`). */
+export function upsertMilestone(list: Milestone[], m: Milestone) {
+  const rest = list.filter((x) => x.key !== m.key)
+  return [...rest, m].sort((a, b) => a.at.localeCompare(b.at))
+}

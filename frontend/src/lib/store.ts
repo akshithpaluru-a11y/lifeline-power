@@ -1,3 +1,4 @@
+import { upsertMilestone } from './time'
 import { useSyncExternalStore } from 'react'
 import type { BackupSource, Device, Household, Outage, Plan, StreamEvent } from './types'
 import { api } from './api'
@@ -56,7 +57,7 @@ function onEvent(e: StreamEvent) {
     case 'outage_started': case 'check_in': set({ outage: e.data.outage, missed: null }); break
     case 'outage_ended': set({ outage: null, missed: null }); break
     case 'ack': if (state.outage?.id === e.data.outage_id) set({ outage: { ...state.outage, acks: [...state.outage.acks.filter((a) => a.caregiver_id !== e.data.ack.caregiver_id), e.data.ack] } }); break
-    case 'milestone': if (state.outage?.id === e.data.outage_id) set({ outage: { ...state.outage, milestones: state.outage.milestones.map((m) => (m.key === e.data.milestone.key ? e.data.milestone : m)) } }); break
+    case 'milestone': if (state.outage?.id === e.data.outage_id) set({ outage: { ...state.outage, milestones: upsertMilestone(state.outage.milestones, e.data.milestone) } }); break
     case 'missed_check_in': set({ missed: e.data.minutes_overdue }); break
   }
 }

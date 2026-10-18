@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { Navigate, useNavigate } from 'react-router-dom'
 import { AnimatePresence, motion } from 'motion/react'
-import { Car, Check, MapPin, PlugZap, ShieldCheck, Zap, Flag, TriangleAlert, Clock, Phone } from 'lucide-react'
+import { Car, Check, MapPin, PlugZap, ShieldCheck, Zap, Flag, TriangleAlert, Clock, Phone, Plug } from 'lucide-react'
 import { api } from '../lib/api'
 import { getCaregiver, setCaregiver } from '../lib/caregiver'
 import { useNow } from '../lib/useNow'
 import { clock, hms, humanMinutes } from '../lib/format'
-import { criticalLeft } from '../lib/time'
+import { criticalLeft, upsertMilestone } from '../lib/time'
 import { startAlarm, stopAlarm, notify } from '../lib/alarm'
 import type { Household, Outage, Plan, StreamEvent } from '../lib/types'
 import { Logo } from '../components/Logo'
@@ -42,7 +42,7 @@ export default function Live() {
           break
         case 'check_in': setOutage(e.data.outage); setMissed(null); break
         case 'ack': setOutage((o) => (o && o.id === e.data.outage_id ? { ...o, acks: [...o.acks.filter((a) => a.caregiver_id !== e.data.ack.caregiver_id), e.data.ack] } : o)); break
-        case 'milestone': setOutage((o) => (o && o.id === e.data.outage_id ? { ...o, milestones: o.milestones.map((m) => (m.key === e.data.milestone.key ? e.data.milestone : m)) } : o)); break
+        case 'milestone': setOutage((o) => (o && o.id === e.data.outage_id ? { ...o, milestones: upsertMilestone(o.milestones, e.data.milestone) } : o)); break
         case 'missed_check_in': setMissed(e.data.minutes_overdue); startAlarm(); break
         case 'outage_ended': setOutage(null); setEnded(e.data.outage); stopAlarm(); break
       }
@@ -136,6 +136,7 @@ function OutageView({ outage, h, now, missed }: { outage: Outage; h: Household; 
   const t = hms(left * 60_000)
   const elapsed = hms((now - new Date(outage.started_at).getTime()) * outage.speed)
   const drill = outage.drill ?? outage.source === 'drill'
+  const replug = [...outage.milestones].reverse().find((m) => m.key === 'replug' && m.passed)
   const noTime = outage.milestones.find((m) => m.key === 'leave_by' && m.severity === 'critical')
     ?? (outage.plan.critical_runtime_minutes === 0 && bottleneck ? { title: `${first}’s ${bottleneck.label} has no power`, detail: 'It has no battery or backup that can run it. Call or go now, and call 911 if you can’t reach them.' } : undefined)
 
@@ -165,6 +166,13 @@ function OutageView({ outage, h, now, missed }: { outage: Outage; h: Household; 
           <div className="flex items-center gap-2 text-[15px] font-semibold text-alert"><TriangleAlert size={18} className="shrink-0" /> {noTime.title}</div>
           <p className="mt-1.5 text-[13px] leading-relaxed text-fg-2">{noTime.detail}</p>
           <a href="tel:911" className="mt-3 flex items-center justify-center gap-2 rounded-xl bg-alert py-2.5 text-[14px] font-semibold text-ink-950"><Phone size={15} /> Call 911</a>
+        </div>
+      )}
+
+      {replug && !noTime && (
+        <div className="mt-4 rounded-2xl bg-amber/10 p-3.5 ring-1 ring-inset ring-amber/25">
+          <div className="flex items-center gap-2 text-[14px] font-semibold text-amber"><Plug size={16} className="shrink-0" /> {first} needs to move plugs</div>
+          <p className="mt-1 text-[13px] leading-relaxed text-fg-2">{replug.detail}</p>
         </div>
       )}
 

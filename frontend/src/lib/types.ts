@@ -93,6 +93,7 @@ export interface PlanDevice {
   allocations: { backup_id: string; energy_wh: number; minutes: number }[]
   status: 'ok' | 'limited' | 'no_backup'
   status_detail?: string | null
+  plug_steps?: { text: string; backup_id: string; now: boolean }[]
 }
 
 export interface Recommendation {
@@ -114,7 +115,7 @@ export interface Plan {
   assumptions: string[]
 }
 
-export type MilestoneKey = 'power_lost' | 'conserve' | 'check_in' | 'halfway' | 'leave_by' | 'critical_low' | 'depleted'
+export type MilestoneKey = 'power_lost' | 'conserve' | 'check_in' | 'halfway' | 'leave_by' | 'critical_low' | 'depleted' | 'replug'
 
 export interface Milestone {
   key: MilestoneKey

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import { AnimatePresence, motion } from 'motion/react'
-import { Car, Check, Copy, MapPin, Navigation, Phone, PlugZap, ThumbsUp, VolumeX, TriangleAlert } from 'lucide-react'
+import { Car, Check, Copy, MapPin, Navigation, Phone, PlugZap, ThumbsUp, VolumeX, TriangleAlert, Plug } from 'lucide-react'
 import { useStore, checkIn, endOutage, getState } from '../lib/store'
 import { api } from '../lib/api'
 import { stopAlarm } from '../lib/alarm'
@@ -14,6 +14,7 @@ import { Segments } from '../components/Segments'
 import { DeviceIcon } from '../components/DeviceIcon'
 import { Button } from '../components/Button'
 import { LogoMark } from '../components/Logo'
+import { PlugSteps } from '../components/PlugSteps'
 import type { useChargerWatch } from '../lib/power'
 import type { HelpSite } from '../lib/types'
 
@@ -25,6 +26,7 @@ export default function Outage() {
   const now = useNow(outage && outage.speed > 1 ? 250 : 1000)
   const nav = useNavigate()
   const [muted, setMuted] = useState(false)
+  const [seenReplug, setSeenReplug] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
   const [site, setSite] = useState<HelpSite | null>(null)
 
@@ -55,6 +57,8 @@ export default function Outage() {
   const emptyAt = outage.milestones.find((m) => m.key === 'depleted')?.at
   const upcoming = outage.milestones.filter((m) => new Date(m.at).getTime() > now && m.key !== 'depleted' && (!emptyAt || m.at <= emptyAt)).slice(0, 3)
   const leaveBy = outage.milestones.find((m) => m.key === 'leave_by')
+  const replug = outage.milestones.find((m) => m.key === 'replug' && m.passed && m.at !== seenReplug)
+  const plugRows = rows.filter((r) => r.p.plug_steps?.length)
   const noTime = leaveBy?.severity === 'critical' ? leaveBy
     : outage.plan.critical_runtime_minutes === 0 && primary ? { title: `${primary.d.label} has no power`, detail: 'It has no battery or backup that can run it. Get to a place with power now, or call 911.' } : null
   const shareUrl = `${location.origin}/join?code=${h.join_code}`
@@ -109,6 +113,14 @@ export default function Outage() {
         </div>
       )}
 
+      {replug && (
+        <div className="relative mt-3 rounded-2xl bg-amber/10 p-4 ring-1 ring-inset ring-amber/30">
+          <div className="flex items-center gap-2 text-[15px] font-semibold text-amber"><Plug size={17} className="shrink-0" /> {replug.title}</div>
+          <p className="mt-1.5 text-[13px] leading-relaxed text-fg-2">{replug.detail}</p>
+          <button onClick={() => setSeenReplug(replug.at)} className="mt-3 rounded-xl bg-amber px-4 py-2 text-[13px] font-semibold text-ink-950">Done</button>
+        </div>
+      )}
+
       {primary && (
         <motion.div className="relative mt-4 flex justify-center" initial={{ scale: 0.92, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={{ duration: 0.9, ease: [0.16, 1, 0.3, 1] }}>
           <Ring value={frac} size={312} tone={urgent ? 'alert' : 'amber'}>
@@ -139,6 +151,20 @@ export default function Outage() {
           )
         })}
       </section>
+
+      {plugRows.length > 0 && (
+        <section className="surface relative mt-4 rounded-[24px] p-4">
+          <h2 className="text-[14px] font-semibold tracking-tight">Where to plug in</h2>
+          <ul className="mt-3 space-y-3">
+            {plugRows.map(({ p, d }) => (
+              <li key={d.id}>
+                <div className="flex items-center gap-2 text-[13px] font-medium"><DeviceIcon icon={d.icon} size={14} className="text-fg-3" /> {d.label}</div>
+                <PlugSteps steps={p.plug_steps!} className="mt-1.5 pl-[22px]" />
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <section className="surface relative mt-4 rounded-[24px] p-4">
         <div className="flex items-center justify-between">

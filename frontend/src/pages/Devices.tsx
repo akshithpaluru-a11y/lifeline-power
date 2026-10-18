@@ -8,6 +8,7 @@ import { aiEnabled, api, ApiError } from '../lib/api'
 import type { BackupSource, Device } from '../lib/types'
 import { BackupIcon, DeviceIcon } from '../components/DeviceIcon'
 import { Segments } from '../components/Segments'
+import { PlugSteps } from '../components/PlugSteps'
 import { Sheet } from '../components/Sheet'
 import { Field } from '../components/Field'
 import { Button } from '../components/Button'
@@ -49,6 +50,7 @@ export default function Devices() {
                 </span>
                 {d.internal_battery_wh > 0 && <Segments value={d.charge_percent / 100} count={24} tone={d.charge_percent < 30 ? 'alert' : 'live'} className="mt-2.5 h-1" />}
                 {p?.status_detail && <span className={`mt-2 block text-[12px] leading-snug ${p.status === 'ok' ? 'text-fg-4' : 'text-amber/90'}`}>{p.status_detail}</span>}
+                {!!p?.plug_steps?.length && <PlugSteps steps={p.plug_steps} className="mt-2" />}
               </span>
               <span className="shrink-0 text-right">
                 <span className={`tnum block text-[17px] font-semibold ${!p?.total_minutes ? 'text-alert' : ''}`}>{p?.total_minutes ? humanMinutes(p.total_minutes) : '0m'}</span>
@@ -76,7 +78,7 @@ export default function Devices() {
                   {b.capacity_wh ? `${b.capacity_wh} Wh · ${b.charge_percent ?? 100}% · ${b.max_output_watts} W max` : `${b.fuel_hours ?? 0} h of fuel · ${b.max_output_watts} W max`}
                 </span>
                 {p && p.usable_wh > 0 && <Segments value={p.allocated_wh / p.usable_wh} count={24} tone="muted" className="mt-2.5 h-1" />}
-                {plugs.length > 0 && (
+                {plugs.length > 0 && !plan?.devices.some((x) => x.plug_steps?.length) && (
                   <span className="mt-2 block text-[12px] leading-snug text-fg-3">
                     Plug in: <span className="text-fg-2">{plugs.join(', ')}</span>
                   </span>
@@ -130,7 +132,7 @@ export function DeviceForm({ value, onDone, onSubmit }: { value: DraftDevice; on
   const photo = async (f: File) => {
     if (f.size > 3.5 * 1024 * 1024) return setScanNote('That photo is too big. Use one under 3.5 MB, or type the model name.')
     setBusy(true)
-    try { applyMatch(await api.identifyPhoto(f)) } catch (e) { setScanNote(e instanceof ApiError && e.status === 400 ? e.message : 'Couldn’t read that photo. Type the model name instead.') } finally { setBusy(false) }
+    try { applyMatch(await api.identifyPhoto(f)) } catch (e) { setScanNote(e instanceof ApiError && (e.status === 400 || e.status === 503) ? e.message : 'Couldn’t read that photo. Type the model name instead.') } finally { setBusy(false) }
   }
 
   const save = async () => {
