@@ -17,7 +17,13 @@ import pytest
 from app.ai import MAX_IMAGE_BYTES, DeviceIdentifier, identify_from_catalog
 from app.catalog import DEVICE_CATALOG
 from app.errors import ApiError
-from app.outage_engine import HelpTarget, TimelineContext, advance_state, build_milestones
+from app.outage_engine import (
+    HelpTarget,
+    TimelineContext,
+    advance_state,
+    build_milestones,
+    replug_detail,
+)
 from app.planner import BackupInput, DeviceInput, HouseholdFacts, build_plan, plugs_of
 from tests.support import FakeClock, Home, device, generator, station
 
@@ -110,23 +116,35 @@ async def test_hourly_full_wheelchair_readings_leave_the_ventilator_countdown_st
 # --- P4: a check-in keeps the plugs where the family put them ------------------------------
 
 
-async def test_check_in_without_readings_keeps_the_car_s_devices_and_the_countdown(
-    home: Home, clock: FakeClock
-) -> None:
+async def test_check_ins_never_move_plugs_without_saying_so(home: Home, clock: FakeClock) -> None:
+    labels = {}
     for kind in ("home_ventilator", "oxygen_concentrator_portable", "infusion_pump"):
-        await home.add_device(kind=kind)
-    await home.add_device(kind="suction_machine")
+        labels[(await home.add_device(kind=kind, label=kind))["id"]] = kind
+    labels[(await home.add_device(kind="suction_machine", label="suction"))["id"]] = "suction"
     car = await home.add_backup(type="car_inverter")
     outage = await home.start_outage()
-    on_car = next(b for b in outage["plan"]["backups"] if b["backup_id"] == car["id"])
-    depleted = milestone_at(outage, "depleted")
 
-    for _ in range(4):
+    def on_car(o: dict[str, Any]) -> list[str]:
+        entry = next(b for b in o["plan"]["backups"] if b["backup_id"] == car["id"])
+        return list(entry["device_ids"])
+
+    before, depleted = on_car(outage), milestone_at(outage, "depleted")
+    for _ in range(5):
         clock.advance(minutes=60)
         outage = await check_in(home)
-        again = next(b for b in outage["plan"]["backups"] if b["backup_id"] == car["id"])
-        assert again["device_ids"] == on_car["device_ids"]
-        assert abs((milestone_at(outage, "depleted") - depleted).total_seconds()) < 60
+        replug = [m for m in outage["milestones"] if m["key"] == "replug"]
+        if on_car(outage) == before:
+            # Same plugs: the countdown stays where it was.
+            assert abs((milestone_at(outage, "depleted") - depleted).total_seconds()) < 60
+        else:
+            # Moved: only for real extra time, and a "Move plugs now" alert names every device
+            # whose plugs changed, due at this check-in.
+            assert milestone_at(outage, "depleted") >= depleted + timedelta(minutes=29)
+            [alert] = replug
+            assert alert["at"] == outage["last_check_in_at"]
+            for moved in set(before) ^ set(on_car(outage)):
+                assert labels[moved] in alert["detail"]
+        before, depleted = on_car(outage), milestone_at(outage, "depleted")
 
 
 def test_a_device_whose_backup_ran_dry_moves_to_one_with_room() -> None:
@@ -374,3 +392,126 @@ def test_a_generator_lists_everything_it_runs() -> None:
     b = device("b", draw_watts=50)
     car = generator("car", type="car_inverter", max_output_watts=150, fuel_hours=2)
     assert (plugs_of(build_plan([a, b], [car], FACTS, now=START)) or {})["car"] == ["a", "b"]
+
+
+# --- Round 3 review: plug steps, re-arranging mid-outage, emergency advice -----------------
+
+
+def steps_of(plan: Any, device_id: str) -> list[str]:
+    entry = next(d for d in plan.devices if d.device_id == device_id)
+    return [s.text for s in entry.plug_steps]
+
+
+def test_plug_steps_say_when_to_plug_in_a_device_with_its_own_battery() -> None:
+    vent = device("vent", draw_watts=60)  # no battery: on the station from the start
+    o2 = device("o2", draw_watts=60, internal_battery_wh=200, ac_powered=False)
+    plan = build_plan([vent, o2], [station("st", label="Jackery")], FACTS, now=START)
+    assert steps_of(plan, "vent") == ["Plug it into Jackery now."]
+    assert steps_of(plan, "o2") == [
+        "Start it on its own battery.",
+        "When its own battery runs low, plug it into Jackery.",
+    ]
+
+
+def test_plug_steps_follow_a_device_from_the_car_to_a_station() -> None:
+    vent = device("vent", draw_watts=60, internal_battery_wh=50)
+    car = generator("car", type="car_inverter", label="Car", max_output_watts=150, fuel_hours=1)
+    plan = build_plan([vent], [car, station("st", label="Jackery")], FACTS, now=START)
+    assert steps_of(plan, "vent") == [
+        "Plug it into Car now.",
+        "When Car runs out of fuel, it runs on its own battery.",
+        "When its own battery runs low, plug it into Jackery.",
+    ]
+
+
+def test_other_devices_only_get_batteries_no_life_sustaining_device_needs() -> None:
+    vent = device("vent", draw_watts=400)
+    fridge = device("fridge", life_sustaining=False, draw_watts=60)
+    tv = device("tv", life_sustaining=False, draw_watts=200)
+    backups = [
+        station("st", label="Jackery", capacity_wh=2000),
+        # Too small for the vent's running draw, so only the other devices can use it.
+        station("small", label="EcoFlow", capacity_wh=500, max_output_watts=300),
+    ]
+    plan = build_plan([vent, fridge, tv], backups, FACTS, now=START)
+    assert steps_of(plan, "vent") == ["Plug it into Jackery now."]
+    # The vent needs all of the Jackery, so the fridge and TV share the EcoFlow until it is empty.
+    assert steps_of(plan, "fridge") == ["Plug it into EcoFlow now."]
+    assert steps_of(plan, "tv") == ["Plug it into EcoFlow now."]
+    by_id = {b.backup_id: b.device_ids for b in plan.backups}
+    assert by_id == {"st": ["vent"], "small": ["fridge", "tv"]}
+
+
+def test_a_refuelled_car_is_used_again() -> None:
+    vent = device("vent", draw_watts=60)
+    car = generator("car", type="car_inverter", max_output_watts=150, fuel_hours=10)
+    st = station("st", capacity_wh=300)
+    kept = build_plan([vent], [car, st], FACTS, now=START, keep_plugs={"car": [], "st": ["vent"]})
+    fresh = build_plan([vent], [car, st], FACTS, now=START)
+    assert "vent" in (plugs_of(kept) or {})["car"]
+    assert kept.critical_runtime_minutes == fresh.critical_runtime_minutes
+
+
+def test_a_life_sustaining_device_added_mid_outage_gets_power_by_moving_plugs() -> None:
+    o2 = device(
+        "o2", draw_watts=100, internal_battery_wh=92, spare_batteries_wh=92, ac_powered=False
+    )
+    vent = device("vent", draw_watts=60)  # added mid-outage, no battery
+    car = generator("car", type="car_inverter", max_output_watts=150, fuel_hours=10)
+    plan = build_plan([o2, vent], [car], FACTS, now=START, keep_plugs={"car": ["o2"]})
+    assert plan.critical_runtime_minutes is not None and plan.critical_runtime_minutes > 0
+    assert (plugs_of(plan) or {})["car"] == ["vent"]
+
+
+def test_replug_detail_names_what_moved() -> None:
+    o2 = device(
+        "o2", draw_watts=100, internal_battery_wh=92, spare_batteries_wh=92, ac_powered=False
+    )
+    vent = device("vent", draw_watts=60)
+    car = generator("car", type="car_inverter", label="Car", max_output_watts=150, fuel_hours=10)
+    old = build_plan([o2], [car], FACTS, now=START)
+    new = build_plan([o2, vent], [car], FACTS, now=START, keep_plugs=plugs_of(old))
+    detail = replug_detail(old, new, {"o2": "Mom's O2", "vent": "Dad's vent"})
+    assert detail is not None
+    assert "Mom's O2: unplug it from backup power" in detail
+    assert "Dad's vent: Plug it into Car now." not in detail  # it wasn't in the old plan at all
+    assert replug_detail(new, new, {}) is None
+
+
+async def test_full_readings_from_a_life_sustaining_suction_are_charged_to_the_station(
+    home: Home, clock: FakeClock
+) -> None:
+    vent = await home.add_device(kind="home_ventilator", spare_batteries_wh=0)
+    suction = await home.add_device(kind="suction_machine", internal_battery_wh=100)
+    await home.add_backup(type="power_station", capacity_wh=1000)
+    outage = await home.start_outage()
+    start = outage["plan"]["critical_runtime_minutes"]
+    for hour in range(1, 5):
+        clock.advance(minutes=60)
+        readings = [{"device_id": d["id"], "charge_percent": 100} for d in (vent, suction)]
+        outage = await check_in(home, devices=readings)
+        assert outage["plan"]["critical_runtime_minutes"] <= start - 60 * hour + 1
+
+
+def test_every_unpowered_life_sustaining_device_gets_its_own_emergency_advice() -> None:
+    suction = device("suction", kind="suction_machine", internal_battery_wh=0)
+    o2 = device("o2", kind="oxygen_concentrator_home", draw_watts=300)
+    plan = build_plan([suction, o2], [], FACTS, now=START)
+    ctx = replace(
+        timeline_context({"suction": "suction_machine", "o2": "oxygen_concentrator_home"}),
+        life_sustaining_ids=frozenset({"suction", "o2"}),
+    )
+    milestones = build_milestones(plan, ctx)
+    for key in ("power_lost", "leave_by"):
+        detail = next(m for m in milestones if m.key == key).detail
+        assert "manual suction device" in detail and "oxygen cylinders" in detail, detail
+    power_lost = next(m for m in milestones if m.key == "power_lost").detail
+    assert power_lost.startswith("Sam's suction_machine and Sam's oxygen_concentrator_home have")
+
+
+def test_conserve_says_what_to_plug_in_now() -> None:
+    vent = device("vent", kind="home_ventilator", draw_watts=60)
+    plan = build_plan([vent], [station("st", label="Jackery")], FACTS, now=START)
+    ctx = replace(timeline_context({"vent": "home_ventilator"}), backup_labels={"st": "Jackery"})
+    conserve = next(m for m in build_milestones(plan, ctx) if m.key == "conserve").detail
+    assert conserve.startswith("Plug in now: Sam's home_ventilator into Jackery.")

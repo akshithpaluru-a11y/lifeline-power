@@ -38,6 +38,7 @@ from app.schemas import (
     DevicePlan,
     DeviceStatus,
     Plan,
+    PlugStep,
     Recommendation,
 )
 from app.timeutil import format_duration
@@ -49,8 +50,11 @@ USABLE_BATTERY_FRACTION = 0.9
 """Share of a device battery's charge that is usable before it cuts out."""
 _TOLERANCE = 1e-6
 _SUGGESTED_STATION_ID = "suggested_power_station"
-_MAX_PLUG_CHOICES = 64
-"""How many ways of sharing out overloaded backups the planner compares, at most (rule 5)."""
+_MAX_PLUG_CHOICES = 4096
+"""How many ways of sharing out overloaded backups the planner compares, at most (rule 5).
+In practice `_PLUG_SEARCH_WORK` is the limit: a typical home has every way compared."""
+_REARRANGE_GAIN_MINUTES = 30.0
+"""During an outage, plugs are only moved if that adds at least this much critical runtime."""
 _PLUG_SEARCH_WORK = 131_072
 """Work budget for that comparison (see `_choice_limit`), so big households stay fast."""
 _MAX_FILL_STEPS = 2_000
@@ -406,8 +410,8 @@ def _choose_plugs(
     }
     kept: _Plugs = {}
     for backup in backups:
-        if backup.id not in keep:
-            continue
+        if not keep.get(backup.id):
+            continue  # nothing was plugged into it: free to use, like a backup added mid-outage
         ids = frozenset(
             load.device.id
             for load in group
@@ -719,6 +723,17 @@ def build_plan(
     """
     keep = None if keep_plugs is None else {b: frozenset(ids) for b, ids in keep_plugs.items()}
     outcome = _allocate(devices, backups, saver_all=saver_preview, keep=keep)
+    if keep is not None:
+        # Moving plugs is worth it when it buys real time, e.g. a device added mid-outage that
+        # nothing could run, or a car that was refuelled. The plug steps then say what to move.
+        free = _allocate(devices, backups, saver_all=saver_preview)
+        kept_runtime, free_runtime = outcome.critical_runtime, free.critical_runtime
+        if (
+            kept_runtime is not None
+            and free_runtime is not None
+            and free_runtime >= kept_runtime + _REARRANGE_GAIN_MINUTES
+        ):
+            outcome = free
     device_plans = [_device_plan(load, outcome, backups) for load in outcome.loads]
     critical = outcome.critical_runtime
     return Plan(
@@ -768,7 +783,57 @@ def _device_plan(load: _Load, outcome: _Outcome, backups: Sequence[BackupInput])
         allocations=allocations,
         status=status,
         status_detail=detail,
+        plug_steps=_plug_steps(load, outcome, backups),
     )
+
+
+def _plug_steps(load: _Load, outcome: _Outcome, backups: Sequence[BackupInput]) -> list[PlugStep]:
+    """What to plug the device into and when, in the order the plan uses its power sources.
+
+    The plan's runtimes assume this order (the same one `outage_engine.advance_state` uses):
+    generators and cars first, then the device's own batteries, then shared batteries. Each step
+    after the first is triggered by something the family can see (a car runs out of fuel, the
+    device's low-battery alarm, a station's display at 0%), so no clock is needed. A device that
+    isn't life-sustaining only gets batteries no life-sustaining device needs (rule 3), so it can
+    stay plugged in until they are empty too.
+    """
+    device_id = load.device.id
+    fuel = [b for b in backups if b.id in outcome.fuel[device_id]]
+    shared = [b for b in backups if outcome.flows[device_id].get(b.id, 0.0) > _TOLERANCE]
+    if not fuel and not shared:
+        return []
+    steps: list[PlugStep] = []
+    trigger: str | None = None  # what ends the previous step, e.g. "When Car runs out of fuel"
+    on_backup = False
+    for backup in fuel:
+        if trigger is None:
+            steps.append(
+                PlugStep(text=f"Plug it into {backup.label} now.", backup_id=backup.id, now=True)
+            )
+        else:
+            steps.append(
+                PlugStep(
+                    text=f"{trigger}, move it to {backup.label}.", backup_id=backup.id, now=False
+                )
+            )
+        trigger, on_backup = f"When {backup.label} runs out of fuel", True
+    if load.own_minutes > _TOLERANCE and shared:
+        text = (
+            "Start it on its own battery."
+            if trigger is None
+            else (f"{trigger}, it runs on its own battery.")
+        )
+        steps.append(PlugStep(text=text, backup_id=None, now=trigger is None))
+        trigger, on_backup = "When its own battery runs low", False
+    for backup in shared:
+        if trigger is None:
+            text, now = f"Plug it into {backup.label} now.", True
+        else:
+            verb = "move it to" if on_backup else "plug it into"
+            text, now = f"{trigger}, {verb} {backup.label}.", False
+        steps.append(PlugStep(text=text, backup_id=backup.id, now=now))
+        trigger, on_backup = f"When {backup.label} is empty", True
+    return steps
 
 
 def _status(
@@ -813,9 +878,10 @@ def _status(
 
 
 def _backup_plan(backup: BackupInput, outcome: _Outcome) -> BackupPlan:
-    # What to plug in. A generator runs everything plugged into it at once. A battery lists
-    # only devices that get some of its energy: plugging in one the plan gives nothing (say a
-    # CPAP when the oxygen needs the whole station) would drain energy the plan counts on.
+    # The devices that use it at some point (each device's plug steps say when). A generator
+    # runs everything plugged into it at once. A battery lists only devices that get some of
+    # its energy: plugging in one the plan gives nothing (say a CPAP when the oxygen needs the
+    # whole station) would drain energy the plan counts on.
     plugged = outcome.plugged[backup.id]
     device_ids = [
         load.device.id

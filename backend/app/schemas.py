@@ -22,7 +22,14 @@ OutageSource = Literal["charging_lost", "manual", "drill"]
 OutageStatus = Literal["active", "ended"]
 Severity = Literal["info", "warning", "critical"]
 MilestoneKey = Literal[
-    "power_lost", "conserve", "check_in", "halfway", "leave_by", "critical_low", "depleted"
+    "power_lost",
+    "conserve",
+    "check_in",
+    "halfway",
+    "leave_by",
+    "critical_low",
+    "depleted",
+    "replug",
 ]
 DeviceStatus = Literal["ok", "limited", "no_backup"]
 RecommendationKind = Literal[
@@ -326,6 +333,18 @@ class Allocation(ApiModel):
     minutes: float
 
 
+class PlugStep(ApiModel):
+    """One step in what to plug a device into, in order (additive)."""
+
+    text: str = Field(
+        description='For example "When its own battery runs low, plug it into Jackery 500."'
+    )
+    backup_id: str | None = Field(
+        description="The backup this step plugs it into (null: its own battery)."
+    )
+    now: bool = Field(description="True for a step to take as soon as the plan starts.")
+
+
 class DevicePlan(ApiModel):
     """How long one device can run."""
 
@@ -337,6 +356,11 @@ class DevicePlan(ApiModel):
     status: DeviceStatus
     status_detail: str | None = Field(
         default=None, description="Additive: plain-English reason for `limited` / `no_backup`."
+    )
+    plug_steps: list[PlugStep] | None = Field(
+        default=None,
+        description="Additive: what to plug it into and when, in order. Empty when it just runs "
+        "on its own battery (or nothing can run it).",
     )
 
 

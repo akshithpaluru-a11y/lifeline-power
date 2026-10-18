@@ -34,6 +34,7 @@ from app.outage_engine import (
     build_milestones,
     merge_with_household,
     outage_minutes_between,
+    replug_detail,
 )
 from app.planner import BackupInput, DeviceInput, build_plan, plugs_of
 from app.services.households import backup_input, device_input, household_facts
@@ -96,6 +97,14 @@ def _labels(household: models.Household) -> dict[str, str]:
 
 def _kinds(household: models.Household) -> dict[str, str]:
     return {device.id: device.kind for device in household.devices}
+
+
+def _life_sustaining(household: models.Household) -> frozenset[str]:
+    return frozenset(device.id for device in household.devices if device.life_sustaining)
+
+
+def _backup_labels(household: models.Household) -> dict[str, str]:
+    return {backup.id: backup.label for backup in household.backups}
 
 
 async def active_outage(session: AsyncSession, household_id: str) -> models.Outage | None:
@@ -175,6 +184,8 @@ class OutageService:
                 help_target=target,
                 device_labels=_labels(household),
                 device_kinds=_kinds(household),
+                life_sustaining_ids=_life_sustaining(household),
+                backup_labels=_backup_labels(household),
             )
             outage = models.Outage(
                 id=new_id("og"),
@@ -260,6 +271,9 @@ class OutageService:
                 help_target=HelpTarget(outage.help_site_name, outage.travel_minutes),
                 device_labels=_labels(household),
                 device_kinds=_kinds(household),
+                life_sustaining_ids=_life_sustaining(household),
+                backup_labels=_backup_labels(household),
+                replug_detail=replug_detail(old_plan, plan, _labels(household)),
             )
             outage.plan = plan.model_dump(mode="json")
             outage.milestones = dump_milestones(

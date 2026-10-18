@@ -22,7 +22,6 @@ from app.planner import (
     USABLE_BATTERY_FRACTION,
     BackupInput,
     DeviceInput,
-    counted_at_full_draw,
     effective_draw_watts,
     incompatibility,
     own_battery_wh,
@@ -107,6 +106,11 @@ class TimelineContext:
     device_labels: Mapping[str, str]
     device_kinds: Mapping[str, str] = field(default_factory=dict)
     """Device id -> kind, for advice that depends on the device (its emergency backup)."""
+    life_sustaining_ids: frozenset[str] = frozenset()
+    backup_labels: Mapping[str, str] = field(default_factory=dict)
+    replug_detail: str | None = None
+    """What the family must re-plug because this plan changed the plug steps (see `replug_detail`).
+    None if nothing changed."""
 
 
 def to_real_time(origin: datetime, outage_minutes: float, speed: float) -> datetime:
@@ -136,6 +140,12 @@ def build_milestones(
     record of what caregivers were told, not a new warning.
     """
     announced = {m.key: m for m in previous or () if m.key in _START_KEYS}
+    if ctx.replug_detail:
+        replug: Milestone | None = _milestone(
+            "replug", ctx.plan_at, "Move plugs now", ctx.replug_detail, "warning"
+        )
+    else:  # the last change stays as a record of what the family was told
+        replug = next((m for m in previous or () if m.key == "replug"), None)
     start_milestones = [
         announced.get(m.key, m.model_copy(update={"passed": True}))
         for m in (
@@ -171,8 +181,12 @@ def build_milestones(
             halfway_announced=was_passed.get("halfway", False),
         )
 
+    if replug is not None:
+        timeline.append(replug)
     timeline = start_milestones + [
-        sent_halfway
+        item
+        if item.key == "replug"
+        else sent_halfway
         if sent_halfway is not None and item.key == "halfway" and item.at <= ctx.plan_at
         else item.model_copy(
             update={"passed": was_passed.get(item.key, False) and item.at <= ctx.plan_at}
@@ -287,7 +301,8 @@ def _leave_by(
             "leave_by",
             when,
             "Not enough battery to reach power",
-            f"{situation} Call 911 now. While you wait, use {_emergency_backup(plan, ctx)}.",
+            f"{situation} Call 911 now. While you wait, use "
+            f"{_emergency_backup(plan, ctx, ctx.help_target.travel_minutes)}.",
             "critical",
         )
     if name:
@@ -306,10 +321,34 @@ def _leave_by(
     )
 
 
-def _emergency_backup(plan: Plan, ctx: TimelineContext) -> str:
-    """What to switch to while the device that runs out first has no power."""
-    kind = ctx.device_kinds.get(plan.bottleneck_device_id or "", "custom")
-    return device_spec(kind).emergency_backup
+def _out_of_power(plan: Plan, ctx: TimelineContext, within: float) -> list[str]:
+    """Life-sustaining devices with at most `within` minutes of power, the bottleneck first."""
+    ids = [plan.bottleneck_device_id] if plan.bottleneck_device_id else []
+    ids += [
+        d.device_id
+        for d in plan.devices
+        if d.device_id in ctx.life_sustaining_ids
+        and d.device_id not in ids
+        and d.total_minutes <= within + _TOLERANCE
+    ]
+    return ids
+
+
+def _emergency_backup(plan: Plan, ctx: TimelineContext, within: float) -> str:
+    """What to switch to for every life-sustaining device with at most `within` minutes left.
+
+    One device: its backup ("a manual suction device if you have one"). Several: each device's
+    backup by name, so an oxygen concentrator isn't left out because the suction ran out first.
+    """
+    ids = _out_of_power(plan, ctx, within)
+
+    def backup(device_id: str) -> str:
+        return device_spec(ctx.device_kinds.get(device_id, "custom")).emergency_backup
+
+    if len(ids) <= 1:
+        return backup(ids[0] if ids else "")
+    each = "; ".join(f"{ctx.device_labels.get(i, 'the device')}: {backup(i)}" for i in ids)
+    return f"the emergency backup for each device ({each})"
 
 
 def _bottleneck_label(plan: Plan, ctx: TimelineContext) -> str:
@@ -335,10 +374,20 @@ def _power_lost_detail(plan: Plan, ctx: TimelineContext) -> str:
     """The first thing the family reads: say so plainly if a life-sustaining device has stopped."""
     critical = plan.critical_runtime_minutes
     if critical is not None and critical <= 0:
+        names = [
+            ctx.device_labels.get(i, "A life-sustaining device")
+            for i in _out_of_power(plan, ctx, 0)
+        ]
+        names = names or [_bottleneck_label(plan, ctx)]
+        subject = (
+            f"{names[0]} has no battery or backup power, so it stopped"
+            if len(names) == 1
+            else f"{', '.join(names[:-1])} and {names[-1]} have no battery or backup power, so "
+            "they stopped"
+        )
         return (
-            f"{_bottleneck_label(plan, ctx)} has no battery or backup power, so it stopped when "
-            f"the power went out. Switch now to {_emergency_backup(plan, ctx)}, and call 911 if "
-            "you can't get power right away."
+            f"{subject} when the power went out. Switch now to "
+            f"{_emergency_backup(plan, ctx, 0)}, and call 911 if you can't get power right away."
         )
     return "Devices are running on batteries and backup power now."
 
@@ -356,7 +405,18 @@ def _conserve_detail(plan: Plan, ctx: TimelineContext) -> str:
         if rec.kind == "saver_mode" and device_id in ctx.device_labels:
             spec = device_spec(ctx.device_kinds.get(device_id, "custom"))
             steps.append(spec.saver_outage_action.format(label=ctx.device_labels[device_id]))
+    plug_now = [
+        f"{ctx.device_labels[d.device_id]} into {ctx.backup_labels[backup_id]}"
+        for d in plan.devices
+        for step in d.plug_steps or ()
+        if step.now
+        and (backup_id := step.backup_id) is not None
+        and backup_id in ctx.backup_labels
+        and d.device_id in ctx.device_labels
+    ]
     detail = "Unplug everything that isn't medical and keep the fridge closed."
+    if plug_now:
+        detail = f"Plug in now: {'; '.join(plug_now)}. {detail}"
     if steps:
         detail += (
             " Lower-power settings make batteries last longer. Only if your care team has "
@@ -521,10 +581,11 @@ def advance_state(
         device = item.device
         full_wh = device.internal_battery_wh * USABLE_BATTERY_FRACTION
         efficiency = _inverter_efficiency(device)
-        if device.duty_cycle < 1 and not counted_at_full_draw(device):
+        if device.duty_cycle < 1 and not device.life_sustaining:
             # Its estimate is a daily average (a wheelchair, a fridge), so a high reading may
             # just mean it was used less than average. Only charge it *gained* since the plan
-            # must have come from somewhere else.
+            # must have come from somewhere else. A life-sustaining one (suction) is charged in
+            # full: guessing light use there would make the countdown too long.
             gained_wh = max(0.0, item.reading - device.charge_percent) / 100 * full_wh
             to_draw = gained_wh / efficiency
         else:
@@ -662,3 +723,24 @@ def merge_with_household(
         for b in household_backups
     ]
     return devices, backups
+
+
+def replug_detail(old: Plan, new: Plan, device_labels: Mapping[str, str]) -> str | None:
+    """What changed in the plug steps between two plans, or None if nothing did.
+
+    A plan made before plug steps existed (`plug_steps` is None) can't be compared, so nothing
+    is reported for it.
+    """
+    before = {d.device_id: d.plug_steps for d in old.devices}
+    changes = []
+    for device in new.devices:
+        old_steps = before.get(device.device_id)
+        new_steps = device.plug_steps or []
+        if old_steps is None or [s.text for s in old_steps] == [s.text for s in new_steps]:
+            continue
+        label = device_labels.get(device.device_id, "A device")
+        if new_steps:
+            changes.append(f"{label}: " + " ".join(s.text for s in new_steps))
+        elif any(s.backup_id for s in old_steps):
+            changes.append(f"{label}: unplug it from backup power; it runs on its own battery now.")
+    return " ".join(changes) if changes else None
