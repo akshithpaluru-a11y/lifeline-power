@@ -11,3 +11,7 @@ services:
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false
+      # Render's proxy reaches the service from its private network. Trusting only private
+      # addresses means a forged X-Forwarded-For from a client is ignored.
+      - key: FORWARDED_ALLOW_IPS
+        value: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.1,::1

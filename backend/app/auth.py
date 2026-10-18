@@ -115,12 +115,18 @@ def client_key(host: str | None) -> str:
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
-        return host
+        # Not an address (a forged forwarding header, a test client): one shared key, so made-up
+        # names can't each start a fresh count.
+        return "invalid"
     if isinstance(address, ipaddress.IPv6Address):
         if address.ipv4_mapped is not None:
             return str(address.ipv4_mapped)
         return str(ipaddress.ip_network((address, 56), strict=False))
     return str(address)
+
+
+_MAX_ATTEMPTS_PER_LIMIT = 10
+"""Attempts kept in the window (right ones too), at most, as a multiple of the overall limit."""
 
 
 @dataclass(slots=True)
@@ -146,7 +152,8 @@ class JoinCodeGuard:
     reached, attempts are refused without looking at the code at all, except that a client with
     no wrong codes in the window still gets one try while only the overall limit is reached:
     otherwise anyone could pause joining for every family by sending wrong codes from many
-    addresses. Guesses per window then stay bounded by the number of distinct clients.
+    addresses. That exemption ends at twice the overall limit, so guesses per window stay
+    bounded even by someone with endless addresses, and so does the memory the counts take.
 
     The counts live in memory, like the event broker's subscriptions: one server process.
     """
@@ -172,7 +179,10 @@ class JoinCodeGuard:
                 f"Too many tries with a wrong join code. Wait {minutes} minutes, then check "
                 "the code with the family."
             )
-        if self._wrong_total >= self._overall and self._wrong_by_client[client] > 0:
+        if (
+            self._wrong_total >= self._overall
+            and (self._wrong_by_client[client] > 0 or self._wrong_total >= 2 * self._overall)
+        ) or len(self._attempts) >= _MAX_ATTEMPTS_PER_LIMIT * self._overall:
             logger.warning("Refused a join attempt: too many wrong join codes from everyone")
             raise _too_many_attempts(
                 "Many wrong join codes have been tried recently, so joining is limited for now. "

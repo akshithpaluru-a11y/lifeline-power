@@ -20,4 +20,6 @@ ENV LIFELINE_STATIC_DIR=/app/static \
 RUN mkdir -p /data
 EXPOSE 8000
 # --proxy-headers so the join-code limits see real client addresses behind the host's proxy.
-CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --proxy-headers --forwarded-allow-ips='*'"]
+# Only proxies listed in FORWARDED_ALLOW_IPS (uvicorn reads it; default 127.0.0.1) are believed,
+# and the client address is the last one they added: a client can't pick its own.
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --proxy-headers"]

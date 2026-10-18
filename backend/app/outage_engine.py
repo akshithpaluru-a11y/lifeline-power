@@ -54,6 +54,9 @@ Only implausible figures (a fraction of a watt on huge batteries) give runtimes 
 """
 _START_KEYS: frozenset[str] = frozenset({"power_lost", "conserve"})
 _TOLERANCE = 1e-9
+_LOW_MINUTES = 1.0
+_LOW_WH = 1.0
+"""Below these a battery or tank counts as used up when comparing plug steps (`replug_detail`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -726,21 +729,46 @@ def merge_with_household(
 
 
 def replug_detail(old: Plan, new: Plan, device_labels: Mapping[str, str]) -> str | None:
-    """What changed in the plug steps between two plans, or None if nothing did.
+    """What the family must re-plug because the plug steps changed, or None if nothing did.
 
-    A plan made before plug steps existed (`plug_steps` is None) can't be compared, so nothing
-    is reported for it.
+    Steps that simply moved on (the car ran out of fuel, so the oxygen is now on the station as
+    the old steps said it would be) are not a change: only a new order of power sources, or a
+    source dropped while it still has power, is. A plan made before plug steps existed
+    (`plug_steps` is None) can't be compared, so nothing is reported for it.
     """
     before = {d.device_id: d.plug_steps for d in old.devices}
+    backups = {b.backup_id: b for b in new.backups}
+
+    def used_up(source: str | None, device: DevicePlan) -> bool:
+        if source is None:  # the device's own battery
+            return device.internal_minutes <= _LOW_MINUTES
+        backup = backups.get(source)
+        if backup is None:
+            return True
+        if backup.fuel_minutes is not None:
+            return backup.fuel_minutes <= _LOW_MINUTES
+        return backup.usable_wh <= _LOW_WH
+
     changes = []
     for device in new.devices:
         old_steps = before.get(device.device_id)
+        if old_steps is None:
+            continue
+        old_sources = [s.backup_id for s in old_steps]
         new_steps = device.plug_steps or []
-        if old_steps is None or [s.text for s in old_steps] == [s.text for s in new_steps]:
+        new_sources = [s.backup_id for s in new_steps]
+        done = len(old_sources) - len(new_sources)
+        if (
+            done >= 0
+            and old_sources[done:] == new_sources
+            and all(used_up(source, device) for source in old_sources[:done])
+        ):
             continue
         label = device_labels.get(device.device_id, "A device")
         if new_steps:
             changes.append(f"{label}: " + " ".join(s.text for s in new_steps))
-        elif any(s.backup_id for s in old_steps):
+        elif device.internal_minutes > _LOW_MINUTES:
             changes.append(f"{label}: unplug it from backup power; it runs on its own battery now.")
+        else:
+            changes.append(f"{label}: unplug it from backup power.")
     return " ".join(changes) if changes else None

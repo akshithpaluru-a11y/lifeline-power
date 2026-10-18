@@ -176,7 +176,8 @@ async def test_successful_joins_do_not_use_up_the_limit(
         ("2001:db8:1:2::7", "2001:db8:1::/56"),
         ("2001:db8:1:2aa:bbbb:bbbb:cccc:dddd", "2001:db8:1:200::/56"),
         ("::ffff:203.0.113.5", "203.0.113.5"),
-        ("testclient", "testclient"),
+        ("testclient", "invalid"),
+        ("forged-name", "invalid"),
         (None, "unknown"),
     ],
 )
@@ -211,6 +212,25 @@ def test_join_code_guard_counts_wrong_codes_in_a_sliding_window() -> None:
     guard.begin("a")
     with pytest.raises(ApiError):
         guard.begin("a")
+
+
+def test_new_clients_stop_getting_a_try_at_twice_the_overall_limit() -> None:
+    # Someone with endless addresses (or forged ones) still can't guess without bound.
+    guard = JoinCodeGuard(FakeClock(), per_client=3, overall=5, window=timedelta(minutes=10))
+    for i in range(10):
+        guard.begin(f"client {i}")
+    with pytest.raises(ApiError) as error:
+        guard.begin("someone new")
+    assert error.value.status_code == 429
+
+
+def test_the_attempts_kept_in_memory_are_capped() -> None:
+    guard = JoinCodeGuard(FakeClock(), per_client=3, overall=5, window=timedelta(minutes=10))
+    for i in range(50):
+        guard.succeeded(guard.begin(f"client {i}"))  # right codes don't count as wrong...
+    with pytest.raises(ApiError):  # ...but the window holds at most 10x the overall limit
+        guard.begin("one more")
+    assert len(guard._attempts) == 50
 
 
 def test_join_code_guard_forgets_everything_old() -> None:
@@ -626,3 +646,20 @@ async def test_json_body_is_cut_off_at_its_limit(client: httpx.AsyncClient) -> N
     )
     assert response.status_code == 400
     assert body.sent <= 2 * 1024 * 1024
+
+
+async def test_only_a_few_photos_are_read_at_once(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.api import ai as ai_api
+
+    response = await client.post(IDENTIFY_URL, files={"image": PHOTO})
+    assert response.status_code == 503  # no API key in tests...
+    assert ai_api._photos_in_progress == 0  # ...and the slot is given back even after an error
+
+    monkeypatch.setattr(ai_api, "_photos_in_progress", ai_api.MAX_PHOTOS_AT_ONCE)
+    response = await client.post(IDENTIFY_URL, files={"image": PHOTO})
+    assert response.status_code == 503
+    assert "Too many photos" in response.json()["error"]["message"]
+    response = await client.post(IDENTIFY_URL, json={"text": "Astral 150"})
+    assert response.status_code == 200  # typing the name still works

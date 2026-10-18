@@ -8,14 +8,16 @@ the contract was renamed, removed or retyped.
 | Where | Field | Meaning |
 |---|---|---|
 | `Plan.devices[]` | `status_detail` (string or null) | Plain-English reason for `limited` / `no_backup`, e.g. "Jackery has no AC outlet". Null when `ok`. |
-| `Plan.backups[]` | `device_ids` (string[]) | What to plug into this backup; everything listed runs at once. Show it as "Plug these into ...". A generator or car lists every device it runs; a battery lists only devices that get some of its energy (`allocations[].energy_wh > 0`), so a device the plan gives nothing is never plugged in to drain it. During an outage, check-ins keep this arrangement (see Outages). |
+| `Plan.devices[]` | `plug_steps` ({ text, backup_id, now }[]) | What to plug this device into and when, in order. `now: true` steps are for right away ("Plug it into Jackery now.", "Start it on its own battery."); later ones start with something the family can see ("When Car runs out of fuel, move it to Jackery.", "When its own battery runs low, plug it into Jackery.", "When Jackery is empty, move it to ..."). `backup_id` is null for a step on the device's own battery. Empty when the device uses no backup. Show these per device: they are the instructions the runtimes assume. |
+| `Plan.backups[]` | `device_ids` (string[]) | Every device that uses this backup at some point; each device's `plug_steps` say when. A generator or car lists every device it runs, all at once; a battery lists only devices that get some of its energy (`allocations[].energy_wh > 0`), so a device the plan gives nothing is never plugged in to drain it. During an outage, check-ins keep this arrangement (see Outages). |
+| `Milestone.key` | `"replug"` | "Move plugs now" (warning): a check-in changed where devices should be plugged in. `detail` names each device and its new steps, e.g. "Mom's O2: Plug it into Jackery now." or "Dad's CPAP: unplug it from backup power; it runs on its own battery now." Due at that check-in, so it goes out right away. It stays in the timeline as a record until the next change. |
 | `Plan.backups[]` | `fuel_minutes` (number or null) | Generators and car inverters: run time on one tank. Null for batteries. For these backups `usable_wh` and `allocated_wh` are the energy delivered to the devices they run over that time, and `unused_wh` is 0. |
 | `Recommendation.kind` | `"safety"` | One more kind: the carbon-monoxide warning (`id: "co_safety"`, `gain_minutes: null`) shown whenever there is a generator or car inverter. Safety items always come first. |
 | `Outage` | `last_check_in_ok` (bool) | False when the owner's latest check-in sent `ok: false` ("I need help"). |
 | `GET /api/health` | `ai_enabled` (bool) | Whether Claude is configured (photo identification needs it). |
 | `GET /api/catalog/backups` items | `has_ac_outlet`, `typical_fuel_hours` | Defaults a new backup of that type gets. |
 | Error responses | code `internal` | Used only for unexpected 500 errors. |
-| `POST /api/caregivers/join` | `429`, code `unavailable` | Too many wrong join codes: 10 per 15 minutes from one client (an IP, or an IPv6 /56), or 200 per 15 minutes overall. Successful joins don't count. While a client is over its limit even the right code gets 429. Once the overall limit is reached, only clients that already sent a wrong code are refused; anyone else still gets a try. Tunable with `LIFELINE_JOIN_ATTEMPTS_PER_CLIENT`, `LIFELINE_JOIN_ATTEMPTS_OVERALL`, `LIFELINE_JOIN_ATTEMPT_WINDOW_SECONDS`. Behind a reverse proxy, run uvicorn with `--proxy-headers --forwarded-allow-ips` so it sees real client IPs. |
+| `POST /api/caregivers/join` | `429`, code `unavailable` | Too many wrong join codes: 10 per 15 minutes from one client (an IP, or an IPv6 /56), or 200 per 15 minutes overall. Successful joins don't count. While a client is over its limit even the right code gets 429. Once the overall limit is reached, only clients that already sent a wrong code are refused; anyone else still gets one try, until wrong codes reach twice the overall limit, when everyone waits. Requests whose client address isn't an IP share one count. Tunable with `LIFELINE_JOIN_ATTEMPTS_PER_CLIENT`, `LIFELINE_JOIN_ATTEMPTS_OVERALL`, `LIFELINE_JOIN_ATTEMPT_WINDOW_SECONDS`. Behind a reverse proxy, run uvicorn with `--proxy-headers` and set `FORWARDED_ALLOW_IPS` to the proxy's addresses only (the Docker image and `render.yaml` do this), so clients can't choose their own address with a forged `X-Forwarded-For`. |
 
 Timestamps carry milliseconds: `2026-10-20T18:04:11.250Z` (still ISO 8601 UTC with `Z`).
 
@@ -97,23 +99,32 @@ Timestamps carry milliseconds: `2026-10-20T18:04:11.250Z` (still ISO 8601 UTC wi
   device was running from something else (usually a power station or UPS it is plugged into), so
   that energy, inverter loss included, is taken from the shared batteries it could use unless the
   owner reported those batteries too. For a device used only part of the time (a wheelchair,
-  a fridge), whose estimate is a daily average, only the charge it *gained* is taken from shared
-  batteries: a full reading may just mean it sat unused. Readings never raise a shared battery's
+  a fridge) that isn't life-sustaining, whose estimate is a daily average, only the charge it
+  *gained* is taken from shared batteries: a full reading may just mean it sat unused. A
+  life-sustaining device is planned at its full draw (rule 1), so a full reading from one is
+  charged to the shared batteries in full. Readings never raise a shared battery's
   estimate. Device settings changed during the outage (for example saver mode switched on) are
   used from then on. Check-in levels belong to the outage; they don't change the household's
   saved devices.
 - A check-in keeps the plug arrangement the family was shown (`Plan.backups[].device_ids`): a
   backup keeps every device it ran as long as it can still run them all. Only devices with no
-  working backup left (new ones, or ones whose battery ran dry) are placed again. So a check-in
-  with no new readings never moves the countdown later.
+  working backup left (new ones, a life-sustaining device added mid-outage, or ones whose backup
+  ran dry) are placed again, and a backup that was refuelled or recharged is used again. Plugs
+  are moved only when that adds at least 30 minutes to the shortest life-sustaining runtime;
+  then a `replug` milestone tells the family what to move. Steps that simply moved on as planned
+  (the car ran out of fuel, so the oxygen is now on the station) don't raise `replug`.
 - The alerts that say a life-sustaining device has no power (`power_lost`, critical `leave_by`)
-  name the backup for that kind of device: a manual resuscitation bag (ventilator), oxygen
+  name the backup for each such device: a manual resuscitation bag (ventilator), oxygen
   cylinders (oxygen), gravity or syringe feeding (feeding pump), a manual suction device, the
-  dialysis center's emergency plan, otherwise "your care team's emergency backup plan".
-- `conserve` lists saver steps as actions after one caveat: "Only if your care team has already
+  dialysis center's emergency plan, otherwise "your care team's emergency backup plan". With
+  several devices out of power they are all listed ("Dad's vent: ...; Mom's O2: ...").
+- `conserve` starts with what to plug in right away ("Plug in now: Dad's vent into Jackery."),
+  then lists saver steps as actions after one caveat: "Only if your care team has already
   approved it: switch Mom's O2 to a lower flow setting; turn off the humidifier on Dad's BiPAP."
 - A `halfway` alert that was already announced stays exactly as announced (time and text) when a
-  check-in rebuilds the timeline.
+  check-in rebuilds the timeline, as long as its new time is still in the past. A check-in that
+  finds more battery than planned can move halfway into the future; it is then a new alert and
+  goes out again when that time comes.
 - `ok: false` is stored as `last_check_in_ok: false` and included in the `check_in` event; the
   plan is still recomputed.
 - `missed_check_in` repeats every further 15 minutes until the owner checks in. After a gap in the
@@ -159,13 +170,15 @@ Timestamps carry milliseconds: `2026-10-20T18:04:11.250Z` (still ISO 8601 UTC wi
   too low becomes the catalog's typical draw, a draw that is too high is capped at the kind's
   maximum, a battery that is too large becomes the typical battery. Any correction lowers
   `confidence` to `low` and the explanation says to check the label.
-- A typed name, or Claude's reading of a label, that matches a model with checked figures (e.g.
-  Trilogy 100, Inogen One G5, Inogen Rove 6, Inogen At Home, EverFlo, Astral, AirSense 10,
-  SimplyGo) is answered from that list with `confidence: "high"`. Typed names don't call Claude at
-  all (`source: "catalog"`). Portable concentrator figures assume the highest setting, so runtimes
-  err short. Models we recognise but have no figures of their own for (Inogen One G4, SimplyGo
-  Mini, Trilogy Evo, ...) get the kind's typical figures with `confidence: "medium"` and an
-  explanation quoting the maker's rated runtime and asking for the battery's watt-hours.
+- A typed name that matches a model with checked figures (e.g. Trilogy 100, Inogen One G5,
+  Inogen Rove 6, Inogen At Home, EverFlo, Astral, AirSense 10, SimplyGo) is answered from that
+  list with `confidence: "high"` without calling Claude (`source: "catalog"`). When Claude reads a
+  label as one of these models, the checked figures are used with Claude's own confidence.
+  Portable concentrator figures assume the highest setting, so runtimes err short. Models we
+  recognise but have no figures of their own for (Inogen One G4, SimplyGo Mini, Trilogy Evo, ...)
+  go to Claude when it is configured; without it they get the kind's typical figures with
+  `confidence: "low"` and an explanation quoting the maker's rated runtime and asking for the
+  battery's watt-hours.
 - A photo's type is read from its bytes, not the declared content type. Bytes that aren't JPEG,
   PNG, GIF or WebP are a 400, and a photo Claude says it can't use is a 400 ("We couldn't read
   that photo"), not a 503. Other errors from Claude count as "unavailable" (503 for a photo alone).

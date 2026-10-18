@@ -213,8 +213,9 @@ Milestone keys: `power_lost` (at start, info), `conserve` (start, info), `check_
 check-in), `halfway` (50% of critical runtime, warning), `leave_by` (critical runtime minus travel
 time to nearest help site minus 30 min buffer, warning; travel defaults to 30 min if unknown),
 `critical_low` (30 min of critical runtime left, critical: "Call 911 if you can't reach power"),
-`depleted` (critical runtime reached, critical). `drill` outages produce the same milestones but
-caregiver events are marked `drill: true`.
+`depleted` (critical runtime reached, critical), `replug` ("Move plugs now", warning: a check-in
+changed where devices should be plugged in; see CONTRACT_NOTES). `drill` outages produce the same
+milestones but caregiver events are marked `drill: true`.
 
 Not every key is always present: `halfway` is left out when it would come at or after `leave_by`
 (short runtimes, or nothing powering a life-sustaining device). When the battery can't last the
@@ -326,4 +327,5 @@ stations.
 A typed name of a model we have checked figures for is answered from our list without calling
 Claude (`source: "catalog"`). Anything else uses Claude when `ANTHROPIC_API_KEY` is set
 (`source: "ai"`); without a key, or if Claude fails, text falls back to keyword matching against
-the catalog (`source: "catalog"`).
+the catalog (`source: "catalog"`). Only a few photos are read at once; past that, a photo gets 503
+`unavailable` ("Too many photos are being read right now") and typing the name still works.

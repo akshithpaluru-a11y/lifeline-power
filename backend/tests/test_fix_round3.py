@@ -253,9 +253,9 @@ def test_small_households_get_the_same_runtime_in_any_backup_order() -> None:
 @pytest.mark.parametrize(
     ("text", "label", "confidence"),
     [
-        ("Inogen One G4", "Inogen One G4", "medium"),
-        ("Philips SimplyGo Mini", "Philips SimplyGo Mini", "medium"),
-        ("Respironics SimplyGo Mini", "Philips SimplyGo Mini", "medium"),
+        ("Inogen One G4", "Inogen One G4", "low"),
+        ("Philips SimplyGo Mini", "Philips SimplyGo Mini", "low"),
+        ("Respironics SimplyGo Mini", "Philips SimplyGo Mini", "low"),
         ("Philips SimplyGo", "Philips SimplyGo", "high"),
         ("Inogen Rove 6", "Inogen Rove 6", "high"),
     ],
@@ -515,3 +515,34 @@ def test_conserve_says_what_to_plug_in_now() -> None:
     ctx = replace(timeline_context({"vent": "home_ventilator"}), backup_labels={"st": "Jackery"})
     conserve = next(m for m in build_milestones(plan, ctx) if m.key == "conserve").detail
     assert conserve.startswith("Plug in now: Sam's home_ventilator into Jackery.")
+
+
+def test_plug_steps_that_moved_on_as_planned_are_not_a_replug() -> None:
+    o2 = device("o2", draw_watts=60, internal_battery_wh=200, ac_powered=False)
+    car = generator("car", type="car_inverter", label="Car", fuel_hours=2)
+    jackery = station("st", label="Jackery")
+    old = build_plan([o2], [car, jackery], FACTS, now=START)
+    assert [s.backup_id for s in old.devices[0].plug_steps or []] == ["car", None, "st"]
+    # The car ran out of fuel and the oxygen's own battery ran down, as its steps said.
+    later = build_plan(
+        [replace(o2, charge_percent=0)],
+        [replace(car, fuel_hours=0), jackery],
+        FACTS,
+        now=START,
+        keep_plugs=plugs_of(old),
+    )
+    assert steps_of(later, "o2") == ["Plug it into Jackery now."]
+    assert replug_detail(old, later, {"o2": "Mom's O2"}) is None
+    # A car taken out of the app needs no alert: the family did that themselves.
+    no_car = build_plan([replace(o2, charge_percent=0)], [jackery], FACTS, now=START)
+    assert replug_detail(old, no_car, {"o2": "Mom's O2"}) is None
+    # But leaving a car that still has fuel is a change worth saying.
+    car_too_small = build_plan(
+        [replace(o2, charge_percent=0)],
+        [replace(car, max_output_watts=10), jackery],
+        FACTS,
+        now=START,
+    )
+    assert replug_detail(old, car_too_small, {"o2": "Mom's O2"}) == (
+        "Mom's O2: Plug it into Jackery now."
+    )

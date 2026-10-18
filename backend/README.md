@@ -73,6 +73,7 @@ Environment variables (or a `.env` file in the working directory):
 | `ANTHROPIC_MODEL` | `claude-haiku-5-5` | Model used by the device helper |
 | `LIFELINE_AI_TIMEOUT_SECONDS` | `30` | Timeout for a Claude request |
 | `LIFELINE_TICKER_ENABLED` | `true` | Run the background outage ticker |
+| `FORWARDED_ALLOW_IPS` | `127.0.0.1,::1` | Read by uvicorn: proxies whose `X-Forwarded-For` is believed (with `--proxy-headers`). List only your proxy's addresses, never `*`, or clients can dodge the join-code limits |
 | `LIFELINE_TICKER_INTERVAL_SECONDS` | `2` | How often the ticker checks active outages |
 | `LIFELINE_SSE_PING_SECONDS` | `15` | Keep-alive comment interval on event streams |
 | `LIFELINE_OVERPASS_URL` | `https://overpass-api.de/api/interpreter` | OpenStreetMap Overpass API |

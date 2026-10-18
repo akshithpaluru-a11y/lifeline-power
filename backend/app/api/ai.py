@@ -1,8 +1,10 @@
 """AI device helper: identify a device from its name or a photo of its label.
 
 Anyone can call this endpoint, and the whole app (alarms included) runs on one event loop, so
-nothing here may do unbounded work: bodies are cut off at a size limit as they arrive, and the
-name is held to the same 500 characters whether it comes as JSON or as a form field.
+nothing here may do unbounded work: bodies are cut off at a size limit as they arrive, the
+name is held to the same 500 characters whether it comes as JSON or as a form field, and only a
+few photos are handled at once (each one is held in memory, several times over, while Claude
+reads it), so a burst of uploads can't run a small server out of memory.
 """
 
 from typing import Any
@@ -15,7 +17,7 @@ from starlette.types import Message
 
 from app.ai import MAX_IMAGE_BYTES
 from app.api.deps import ContextDep
-from app.errors import bad_request
+from app.errors import bad_request, unavailable
 from app.schemas import IdentifyDeviceRequest, IdentifyDeviceResponse
 
 router = APIRouter(tags=["ai"])
@@ -27,6 +29,9 @@ _MAX_TEXT_FIELD_BYTES = 4 * 1024
 """Largest `text` form field the parser will hold; the name itself may be 500 characters."""
 _MAX_JSON_BYTES = 16 * 1024
 """Far more than a 500-character name needs, even with every character escaped."""
+MAX_PHOTOS_AT_ONCE = 3
+_photos_in_progress = 0
+"""Photo requests being read or identified right now (one event loop, so a plain count)."""
 
 _REQUEST_BODY: dict[str, Any] = {
     "required": True,
@@ -56,12 +61,21 @@ _REQUEST_BODY: dict[str, Any] = {
 @router.post("/ai/identify-device", openapi_extra={"requestBody": _REQUEST_BODY})
 async def identify_device(request: Request, context: ContextDep) -> IdentifyDeviceResponse:
     """Identify a device from JSON `{ "text": ... }` or a multipart `image` upload."""
-    if request.headers.get("content-type", "").startswith("multipart/form-data"):
-        text, image, image_type = await _read_form(request)
-    else:
+    global _photos_in_progress
+    if not request.headers.get("content-type", "").startswith("multipart/form-data"):
         body = await _limited(request, _MAX_JSON_BYTES, "The request is too large.").body()
-        text, image, image_type = _validated(body).text, None, None
-    return await context.identifier.identify(text, image, image_type)
+        return await context.identifier.identify(_validated(body).text, None, None)
+    if _photos_in_progress >= MAX_PHOTOS_AT_ONCE:
+        raise unavailable(
+            "Too many photos are being read right now. Try again in a minute, or type the name "
+            "on the label instead."
+        )
+    _photos_in_progress += 1
+    try:
+        text, image, image_type = await _read_form(request)
+        return await context.identifier.identify(text, image, image_type)
+    finally:
+        _photos_in_progress -= 1
 
 
 async def _read_form(request: Request) -> tuple[str | None, bytes | None, str | None]:

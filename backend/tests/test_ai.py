@@ -21,7 +21,7 @@ from app.errors import ApiError
             "Inogen One G5",
             "high",
         ),
-        ("Trilogy Evo", "home_ventilator", "Philips Trilogy Evo", "medium"),
+        ("Trilogy Evo", "home_ventilator", "Philips Trilogy Evo", "low"),
         ("Inogn One G5", "oxygen_concentrator_portable", "Inogen One G5", "medium"),
         ("feeding pump", "enteral_feeding_pump", "Feeding pump", "medium"),
     ],

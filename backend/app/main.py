@@ -144,12 +144,16 @@ def _serve_web_app(app: FastAPI, root: Path) -> None:
     if not index.is_file():
         raise RuntimeError(f"LIFELINE_STATIC_DIR has no index.html: {root}")
 
-    @app.get("/{path:path}", include_in_schema=False)
+    @app.api_route("/{path:path}", methods=["GET", "HEAD"], include_in_schema=False)
     async def web_app(path: str) -> FileResponse:
         if path == "api" or path.startswith("api/"):
             raise not_found("No such API endpoint.")
-        file = (root / path).resolve()
-        if path and file.is_file() and file.is_relative_to(root):
+        try:
+            file = (root / path).resolve()
+            found = bool(path) and file.is_file() and file.is_relative_to(root)
+        except (OSError, ValueError):  # a NUL byte, a name too long for the file system
+            found = False
+        if found:
             return FileResponse(file)
         return FileResponse(index, headers={"Cache-Control": "no-cache"})
 

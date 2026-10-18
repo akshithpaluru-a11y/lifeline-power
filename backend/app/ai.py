@@ -330,8 +330,9 @@ def identify_from_catalog(text: str) -> IdentifyDeviceResponse:
     """Keyword and fuzzy matching against popular models and the catalog (no AI needed)."""
     # 1. A known model named exactly.
     if (model := _known_model(text)) is not None:
-        # Only "high" when we checked the model's own figures, not just its kind's.
-        return _from_model(model, "Matched", "high" if model.has_figures else "medium", "catalog")
+        # Only "high" when we checked the model's own figures. Otherwise they are the kind's
+        # typical figures, which can be far from this model's: "low", so the family checks.
+        return _from_model(model, "Matched", "high" if model.has_figures else "low", "catalog")
 
     # 2. A known model with a typo ("inogn one g5"): compare word windows of the same length.
     words = _normalize(text).split()
@@ -345,7 +346,9 @@ def identify_from_catalog(text: str) -> IdentifyDeviceResponse:
                 if ratio > best_ratio:
                     best_ratio, best_model = ratio, model
     if best_model is not None and best_ratio >= 0.82:
-        return _from_model(best_model, "Looks like", "medium", "catalog")
+        return _from_model(
+            best_model, "Looks like", "medium" if best_model.has_figures else "low", "catalog"
+        )
 
     # 3. Words that describe a kind of device ("oxygen machine", "feeding pump").
     normalized = " ".join(words)
