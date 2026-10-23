@@ -1,0 +1,4 @@
+# Local tool caches and SQLite side files (the root .gitignore covers the rest)
+.mypy_cache/
+*.db-wal
+*.db-shm
